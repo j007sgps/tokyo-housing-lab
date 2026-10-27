@@ -1,0 +1,13 @@
+# 金鑰：絕對不能進 git
+.env
+
+# 資料：可由 API 重抓、由 raw 重建，不進 git
+data/raw/
+data/*.duckdb
+data/*.duckdb.wal
+
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

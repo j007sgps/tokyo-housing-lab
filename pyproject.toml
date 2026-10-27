@@ -1,0 +1,30 @@
+[project]
+name = "tokyo-housing-lab"
+version = "0.1.0"
+description = "東京中古公寓行情分析（個人學習用）"
+requires-python = ">=3.13"
+dependencies = [
+    "duckdb>=2.0.0",
+    "httpx>=0.28.1",
+    "python-dotenv>=1.2.4",
+]
+
+[project.scripts]
+tokyo-housing-lab = "tokyo_housing_lab.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.32,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# manual：需要真的打 API（要金鑰與網路），預設不跑。手動執行：uv run pytest -m manual
+markers = [
+    "manual: 需要真實 API 金鑰與網路，需手動執行",
+]
+addopts = "-m 'not manual'"
