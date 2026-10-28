@@ -3,6 +3,13 @@
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from tokyo_housing_lab.analysis.combined import (
+    CombinedSeries,
+    combined_growth,
+    combined_latest,
+    combined_series,
+    combined_trend,
+)
 from tokyo_housing_lab.analysis.trend import (
     Growth,
     LongTrend,
@@ -14,6 +21,7 @@ from tokyo_housing_lab.analysis.trend import (
 )
 from tokyo_housing_lab.storage.duckdb_store import DuckDBStore
 
+COMBINED = "combined"  # 綜合指標（取引＋換算後的成約），當成第三種「價格種類」用
 INVEST_PRICE_CLASSIFICATION = "01"  # 投資模式只用取引價格：成約價格 2021 年才開始，不夠 10 年
 AGE_BREAKDOWN_YEARS = 5  # 詳細面板的建築年代別中位數：最新完整年往前看幾年
 
@@ -26,6 +34,13 @@ class AgeBucket:
 
 
 @dataclass
+class Combined:
+    series: CombinedSeries
+    latest: Price
+    invest: LongTrend
+
+
+@dataclass
 class Municipality:
     city: str
     name: str
@@ -33,6 +48,7 @@ class Municipality:
     latest: dict[str, Price] = field(default_factory=dict)  # 價格種類 → 最新 4 季
     invest: LongTrend | None = None
     by_age: list[AgeBucket] = field(default_factory=list)
+    combined: Combined | None = None
 
 
 @dataclass
@@ -43,7 +59,10 @@ class Analysis:
     municipalities: dict[str, Municipality]
 
     def growth(self, city: str, price_classification: str, start_year: int, end_year: int) -> Growth:
-        series = self.municipalities[city].yearly.get(price_classification, {})
+        m = self.municipalities[city]
+        if price_classification == COMBINED:
+            return combined_growth(m.combined.series, start_year, end_year)
+        series = m.yearly.get(price_classification, {})
         return growth_between(series, start_year, end_year)
 
 
@@ -71,11 +90,12 @@ def build_analysis(store: DuckDBStore, region: str = "13") -> Analysis:
             )
 
     latest_period = {}
+    latest_stats: dict[tuple[str, str], YearStat] = {}
     for row in store.query("municipality_latest", region=region):
         m = muni(row)
-        m.latest[row["price_classification"]] = latest_price(
-            YearStat(row["n"], row["median_unit_price"], row["spread_log"])
-        )
+        stat = YearStat(row["n"], row["median_unit_price"], row["spread_log"])
+        latest_stats[(row["city"], row["price_classification"])] = stat
+        m.latest[row["price_classification"]] = latest_price(stat)
         latest_period[row["price_classification"]] = (*_quarter(row["first_qi"]), *_quarter(row["last_qi"]))
 
     invest_years = complete.get(INVEST_PRICE_CLASSIFICATION, [])
@@ -91,5 +111,13 @@ def build_analysis(store: DuckDBStore, region: str = "13") -> Analysis:
     for m in munis.values():
         for pc in latest_period:
             m.latest.setdefault(pc, latest_price(None))
+
+    # 綜合指標：以取引為主軸（年份、投資模式的 10 年都跟取引），沒有取引的完整年就不算
+    if invest_years:
+        invest_last = max(invest_years)
+        for m in munis.values():
+            series = combined_series(m.yearly.get("01", {}), m.yearly.get("02", {}))
+            latest = combined_latest(series, latest_stats.get((m.city, "01")), latest_stats.get((m.city, "02")))
+            m.combined = Combined(series, latest, combined_trend(series, invest_last))
 
     return Analysis(region, dict(complete), latest_period, dict(sorted(munis.items())))

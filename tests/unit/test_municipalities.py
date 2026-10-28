@@ -3,7 +3,7 @@ from datetime import datetime
 
 import pytest
 
-from tokyo_housing_lab.analysis.municipalities import build_analysis
+from tokyo_housing_lab.analysis.municipalities import COMBINED, build_analysis
 from tokyo_housing_lab.analysis.trend import MIN_N
 from tokyo_housing_lab.processing.clean import clean_record
 from tokyo_housing_lab.sources.base import SourceRecord
@@ -115,3 +115,19 @@ def test_growth_lookup(store):
     with pytest.raises(ValueError):
         a.growth("13102", "01", 2006, 2006)
     assert a.growth("13102", "01", 2005, 2006).status == "insufficient"  # 2005 不是完整年
+
+
+def test_combined_falls_back_to_toriihiki_without_overlap_years(store):
+    # 成約沒有任何完整年 → 無法換算，綜合就是取引
+    a = build_analysis(store)
+    m = a.municipalities["13102"]
+    c = m.combined
+    assert c.series.offset.status == "insufficient"
+    assert c.series.levels[2006].median == pytest.approx(m.yearly["01"][2006].median)
+    assert c.latest.median == pytest.approx(m.latest["01"].median)
+    assert c.latest.n == m.latest["01"].n  # 成約沒換算，不算進筆數
+    assert c.invest.status == "insufficient"
+    assert a.municipalities["13999"].combined.latest.status == "insufficient"
+    with pytest.raises(ValueError):
+        a.growth("13102", COMBINED, 2006, 2006)
+    assert a.growth("13102", COMBINED, 2005, 2006).status == "insufficient"

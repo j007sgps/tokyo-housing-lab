@@ -63,8 +63,13 @@ class Price:
 def latest_price(stat: YearStat | None) -> Price:
     if stat is None or stat.n < MIN_N:
         return Price(stat.median if stat else None, None, None, stat.n if stat else 0, "insufficient")
-    se = median_log_se(stat)
-    return Price(stat.median, stat.median * math.exp(-_Z95 * se), stat.median * math.exp(_Z95 * se), stat.n, "ok")
+    return price_from_log(math.log(stat.median), median_log_se(stat), stat.n)
+
+
+def price_from_log(log_median: float, se: float, n: int) -> Price:
+    """已知 ln(中位數) 和它的標準誤 → Price。"""
+    m = math.exp(log_median)
+    return Price(m, m * math.exp(-_Z95 * se), m * math.exp(_Z95 * se), n, "ok")
 
 
 @dataclass(frozen=True)
@@ -87,7 +92,11 @@ def growth_between(series: Mapping[int, YearStat], start_year: int, end_year: in
     if a is None or b is None or a.n < MIN_N or b.n < MIN_N:
         return Growth(start_year, end_year, None, None, None, None, "insufficient")
     d = math.log(b.median) - math.log(a.median)
-    se = math.hypot(median_log_se(a), median_log_se(b))
+    return growth_from_log(start_year, end_year, d, math.hypot(median_log_se(a), median_log_se(b)))
+
+
+def growth_from_log(start_year: int, end_year: int, d: float, se: float) -> Growth:
+    """已知 log 漲幅 d 和它的標準誤 → Growth（區間、年率、狀態）。"""
     low, high = math.exp(d - _Z95 * se) - 1, math.exp(d + _Z95 * se) - 1
     status: Status = "uncertain" if low <= 0 <= high else "ok"
     annual = math.exp(d / (end_year - start_year)) - 1
@@ -114,6 +123,11 @@ def long_term_trend(series: Mapping[int, YearStat], last_year: int) -> LongTrend
         for year in range(first_year, last_year + 1)
         if year in series and series[year].n >= MIN_N
     ]
+    return trend_from_points(first_year, last_year, points)
+
+
+def trend_from_points(first_year: int, last_year: int, points: list[tuple[int, float]]) -> LongTrend:
+    """(年, ln 價格) 的點（已篩過樣本門檻）→ 最小平方法的年成長率。"""
     k = len(points)
     if k < INVEST_MIN_YEARS:
         return LongTrend(first_year, last_year, k, None, None, None, "insufficient")
