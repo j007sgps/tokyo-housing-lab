@@ -14,6 +14,16 @@ cp .env.example .env   # 再把 REINFOLIB_API_KEY 換成自己的金鑰
 
 金鑰也可以直接用環境變數 `REINFOLIB_API_KEY` 提供（環境變數優先於 `.env`）。
 
+## 使用方式
+
+```bash
+uv run tokyo-housing-lab fetch   # 打 API，原始 JSON 存到 data/raw/（已有的跳過，有資料的最新 4 季重抓）
+uv run tokyo-housing-lab load    # 只讀 data/raw/，清理後寫進 data/tokyo_housing_lab.duckdb（不打 API）
+```
+
+- `fetch --force`：全部重抓；`fetch --refresh-recent 0`：不重抓最新幾季；`fetch --start 2023Q1`：改起始季
+- `load` 每次都把 `data/raw/` 整個重新載入，跑幾次結果都一樣；任何一個檔案有問題就整批不寫入
+
 ## 測試
 
 ```bash
