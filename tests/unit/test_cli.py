@@ -61,9 +61,9 @@ def test_fetch_and_load(monkeypatch, tmp_path, capsys):
 
     assert cli.main(["fetch", "--raw-dir", str(raw), "--start", "2021Q1"]) == 0
     assert "新存檔 2" in capsys.readouterr().out
-    assert sorted(p.name for p in raw.glob("xit001_*.json")) == [
-        "xit001_13202_2021Q1_p01.json",
-        "xit001_13202_2021Q1_p02.json",
+    assert sorted(p.name for p in raw.glob("xit001_*")) == [  # 預設抓東京都全域（area=13）
+        "xit001_13_2021Q1_p01.json.gz",
+        "xit001_13_2021Q1_p02.json.gz",
     ]
 
     assert cli.main(["load", "--raw-dir", str(raw), "--db", str(db)]) == 0

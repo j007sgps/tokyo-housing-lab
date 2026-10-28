@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 from tokyo_housing_lab.sources.base import QuarterQuery, SourceRecord
+from tokyo_housing_lab.sources.raw_store import read_raw_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 FIELD_MAP = {
     "PriceCategory": "price_category",
     "Type": "property_type",
-    "Region": "region",
+    "Region": "land_area_type",  # 住宅地／商業地…（土地才有）
     "MunicipalityCode": "municipality_code",
     "Prefecture": "prefecture",
     "Municipality": "municipality",
@@ -45,7 +46,8 @@ FIELD_MAP = {
     "Remarks": "remarks",
 }
 
-_FILENAME = re.compile(r"xit001_(\d{5})_(\d{4})Q([1-4])_p(\d{2})\.json")
+_FILENAME = re.compile(r"xit001_(\d{2}|\d{5})_(\d{4})Q([1-4])_p(\d{2})\.json(\.gz)?")
+_MUNICIPALITY_CODE = re.compile(r"\d{5}")
 
 
 class RawFileError(ValueError):
@@ -53,18 +55,18 @@ class RawFileError(ValueError):
 
 
 def query_from_filename(name: str) -> QuarterQuery:
-    """xit001_13202_2024Q1_p01.json → 請求時的查詢條件（RawStore.path_for 的反向）。"""
+    """xit001_13_2024Q1_p01.json.gz → 請求時的查詢條件（RawStore.path_for 的反向）。"""
     m = _FILENAME.fullmatch(name)
     if not m:
         raise RawFileError(f"不是 XIT001 原始檔的檔名：{name}")
-    city, year, quarter, pc = m.groups()
-    return QuarterQuery(city, int(year), int(quarter), pc)
+    region, year, quarter, pc, _ = m.groups()
+    return QuarterQuery(region, int(year), int(quarter), pc)
 
 
 def read_raw_file(path: Path) -> list[SourceRecord]:
     """讀一個原始檔。年／季、價格種類以檔名（＝請求參數）為準，並和回應內容交叉檢查。"""
     query = query_from_filename(path.name)
-    doc = json.loads(path.read_bytes())
+    doc = json.loads(read_raw_bytes(path))
     if doc.get("status") != "OK":
         raise RawFileError(f"{path.name}：status 不是 OK（{doc.get('status')!r}）")
 
@@ -82,10 +84,16 @@ def read_raw_file(path: Path) -> list[SourceRecord]:
             raise RawFileError(
                 f"{path.name} 第 {i} 筆的 Period={row['Period']!r}，和請求的 {expected_period} 不一致"
             )
+        city = row["MunicipalityCode"]
+        if not (_MUNICIPALITY_CODE.fullmatch(city) and city.startswith(query.region)):
+            raise RawFileError(
+                f"{path.name} 第 {i} 筆的 MunicipalityCode={city!r}，不在請求的地區 {query.region} 裡"
+            )
         records.append(
             SourceRecord(
                 source="api",
-                city=query.city,
+                region=query.region,
+                city=city,
                 year=query.year,
                 quarter=query.quarter,
                 price_classification=query.price_classification,

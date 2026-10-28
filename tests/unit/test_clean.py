@@ -132,7 +132,7 @@ def make_record(**overrides) -> SourceRecord:
         period="2024年第1四半期",
     )
     fields.update(overrides)
-    return SourceRecord("api", "13202", 2024, 1, "01", "xit001_13202_2024Q1_p01.json", 7, fields)
+    return SourceRecord("api", "13202", "13202", 2024, 1, "01", "xit001_13202_2024Q1_p01.json", 7, fields)
 
 
 def test_clean_record_normal():

@@ -8,7 +8,7 @@ import pytest
 from conftest import FAKE_KEY
 from tokyo_housing_lab.config import ApiKey
 from tokyo_housing_lab.sources.base import QuarterQuery
-from tokyo_housing_lab.sources.raw_store import RawStore
+from tokyo_housing_lab.sources.raw_store import RawStore, read_raw_bytes
 from tokyo_housing_lab.sources.reinfolib_api import (
     KEY_HEADER,
     ReinfolibAPIError,
@@ -205,8 +205,8 @@ def test_fetch_range_saves_skips_and_records_no_data(clock, tmp_path, sample_bod
         ("2021", "2", "01"),
         ("2021", "2", "02"),
     ]
-    assert store.path_for(QuarterQuery("13202", 2021, 1, "01")).read_bytes() == b'{"already": "here"}'
-    assert store.path_for(QuarterQuery("13202", 2021, 2, "01")).read_bytes() == sample_body
+    assert read_raw_bytes(store.path_for(QuarterQuery("13202", 2021, 1, "01"))) == b'{"already": "here"}'
+    assert read_raw_bytes(store.path_for(QuarterQuery("13202", 2021, 2, "01"))) == sample_body
     assert not store.exists(QuarterQuery("13202", 2021, 2, "02"))  # 404 不存檔
     log_lines = (tmp_path / "fetch_log.jsonl").read_text().splitlines()
     assert len(log_lines) == 3  # 跳過的不算，有打 API 的才記
@@ -219,7 +219,7 @@ def test_fetch_range_force_refetches(clock, tmp_path, sample_body):
     client, requests = make_client(clock, [gzip_json(sample_body)])
     fetch_range(client, store, "13202", (2021, 1), date(2021, 1, 15), price_classifications=["01"], force=True)
     assert len(requests) == 1
-    assert store.path_for(q).read_bytes() == sample_body
+    assert read_raw_bytes(store.path_for(q)) == sample_body
 
 
 def test_fetch_range_error_stops_and_keeps_earlier_files(clock, tmp_path, sample_body):
@@ -246,8 +246,8 @@ def test_fetch_range_refreshes_latest_saved_quarters(clock, tmp_path, sample_bod
         assert by_quarter[(year, quarter, "01")] == by_quarter[(year, quarter, "02")] == "saved"
     assert by_quarter[(2022, 3, "01")] == "no_data"
     assert len(requests) == 10
-    assert store.path_for(QuarterQuery("13202", 2022, 2, "01")).read_bytes() == sample_body
-    assert store.path_for(QuarterQuery("13202", 2021, 2, "01")).read_bytes() == b'{"old": true}'
+    assert read_raw_bytes(store.path_for(QuarterQuery("13202", 2022, 2, "01"))) == sample_body
+    assert read_raw_bytes(store.path_for(QuarterQuery("13202", 2021, 2, "01"))) == b'{"old": true}'
 
 
 def test_fetch_range_refresh_default_is_four(clock, tmp_path, sample_body):
@@ -256,3 +256,29 @@ def test_fetch_range_refresh_default_is_four(clock, tmp_path, sample_body):
     client, requests = make_client(clock, [gzip_json(sample_body)] * 2)
     fetch_range(client, store, "13202", (2021, 1), date(2021, 1, 15))
     assert len(requests) == 2  # 唯一一季在最新 4 季內，01 也重抓
+
+
+def test_two_digit_region_uses_area_param(clock, sample_body):
+    client, requests = make_client(clock, [gzip_json(sample_body)])
+    client.fetch(QuarterQuery("13", 2024, 1, "02"))
+    assert dict(requests[0].url.params) == {"year": "2024", "quarter": "1", "area": "13", "priceClassification": "02"}
+
+
+def test_fetch_range_skips_quarters_before_official_start(clock, tmp_path, sample_body):
+    # 成約價格（02）2021Q1 起才有，取引價格（01）2005Q3 起才有：更早的季不請求
+    client, requests = make_client(clock, [gzip_json(sample_body)] * 3)
+    outcomes = fetch_range(client, RawStore(tmp_path), "13", (2020, 4), date(2021, 1, 15), refresh_recent=0)
+    assert [(q.year, q.quarter, q.price_classification) for q, _ in outcomes] == [
+        (2020, 4, "01"),
+        (2021, 1, "01"),
+        (2021, 1, "02"),
+    ]
+    assert len(requests) == 3
+
+
+def test_fetch_range_never_requests_before_2005q3(clock, tmp_path, sample_body):
+    client, requests = make_client(clock, [gzip_json(sample_body)])
+    fetch_range(client, RawStore(tmp_path), "13", (2005, 1), date(2005, 8, 1), refresh_recent=0)
+    assert [(r.url.params["year"], r.url.params["quarter"], r.url.params["priceClassification"]) for r in requests] == [
+        ("2005", "3", "01")
+    ]

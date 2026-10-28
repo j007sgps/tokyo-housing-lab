@@ -1,7 +1,9 @@
+import gzip
 import json
 import shutil
 from datetime import datetime
 
+import duckdb
 import pytest
 
 from conftest import FIXTURES
@@ -153,3 +155,80 @@ def test_fetch_log_loaded_and_replaced(raw_dir, store):
 def test_reserved_word_column_works(raw_dir, store):
     load_raw_dir(raw_dir, store)
     assert store.con.execute('SELECT count("use") FROM transactions').fetchone()[0] >= 0
+
+
+def test_fetch_log_new_region_key(raw_dir, store):
+    entry = {
+        "fetched_at": "2026-10-28T02:00:00+00:00",
+        "region": "13",
+        "year": 2026,
+        "quarter": 2,
+        "price_classification": "02",
+        "http_status": 404,
+        "result": "no_data",
+        "file": None,
+    }
+    (raw_dir / "fetch_log.jsonl").write_text(json.dumps(entry) + "\n")
+    load_raw_dir(raw_dir, store)
+    assert store.con.execute("SELECT region FROM fetch_log").fetchall() == [("13",)]
+
+
+def test_rows_can_be_streamed(store):
+    def stream():
+        for name in ("a.json", "b.json"):
+            yield name, (row_for(name, row_index=i) for i in range(3))
+
+    assert store.replace_files(stream(), T0, prune_others=True) == 6
+    assert count(store) == 6
+
+
+def test_old_schema_is_rebuilt(tmp_path):
+    db = tmp_path / "old.duckdb"
+    with duckdb.connect(str(db)) as con:  # M1 時期的表格：沒有 region 欄
+        con.execute("CREATE TABLE transactions (source VARCHAR, city VARCHAR, raw_file VARCHAR, row_index INTEGER)")
+        con.execute("INSERT INTO transactions VALUES ('api', '13202', 'x.json', 0)")
+    with DuckDBStore(db) as s:
+        cols = [c for (c,) in s.con.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'transactions' ORDER BY ordinal_position").fetchall()]
+        assert cols == [name for name, _ in TRANSACTION_COLUMNS]
+        assert count(s) == 0  # 重建後是空的，重新 load 即可
+
+
+# --- 東京都全域（area）檔案與 M1 的市區町村（city）檔案並存 ---
+
+
+def gz_copy(src, dst, municipality=None):
+    doc = json.loads(src.read_text())
+    if municipality:
+        for row in doc["data"]:
+            row["MunicipalityCode"] = municipality
+    dst.write_bytes(gzip.compress(json.dumps(doc, ensure_ascii=False).encode()))
+
+
+def test_city_file_covered_by_area_file_is_skipped(raw_dir, store):
+    # raw_dir 已有立川市 2024Q1 的 01、02（未壓縮的 .json）；加上東京都全域 2024Q1 的 01
+    gz_copy(FIXTURES / "xit001_13202_2024Q1_p01_sample.json", raw_dir / "xit001_13_2024Q1_p01.json.gz")
+    summary = load_raw_dir(raw_dir, store)
+    assert summary.skipped_files == ("xit001_13202_2024Q1_p01.json",)
+    assert summary.files == 2
+    assert count(store, "price_classification = '01'") == 3  # 沒有算兩次
+    assert count(store, "raw_file = 'xit001_13202_2024Q1_p01.json'") == 0
+    assert count(store, "region = '13' AND city = '13202'") == 3
+
+
+def test_city_file_from_other_quarter_is_kept(raw_dir, store):
+    gz_copy(FIXTURES / "xit001_13202_2024Q1_p01_sample.json", raw_dir / "xit001_13_2024Q2_p01.json.gz")
+    path = raw_dir / "xit001_13_2024Q2_p01.json.gz"
+    doc = json.loads(gzip.decompress(path.read_bytes()))
+    for row in doc["data"]:
+        row["Period"] = "2024年第2四半期"
+    path.write_bytes(gzip.compress(json.dumps(doc, ensure_ascii=False).encode()))
+    summary = load_raw_dir(raw_dir, store)
+    assert summary.skipped_files == ()
+    assert summary.files == 3
+
+
+def test_gz_preferred_over_legacy_json_of_same_query(raw_dir, store):
+    gz_copy(FIXTURES / "xit001_13202_2024Q1_p01_sample.json", raw_dir / "xit001_13202_2024Q1_p01.json.gz")
+    summary = load_raw_dir(raw_dir, store)
+    assert "xit001_13202_2024Q1_p01.json" in summary.skipped_files
+    assert count(store, "price_classification = '01'") == 3

@@ -7,6 +7,8 @@
 """
 
 import json
+import logging
+import tempfile
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 from importlib.resources import files
@@ -14,6 +16,8 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import duckdb
+
+logger = logging.getLogger(__name__)
 
 
 def _parsed(name: str, sql_type: str) -> list[tuple[str, str]]:
@@ -25,6 +29,7 @@ def _parsed(name: str, sql_type: str) -> list[tuple[str, str]]:
 TRANSACTION_COLUMNS: list[tuple[str, str]] = [
     ("source", "VARCHAR"),
     ("city", "VARCHAR"),
+    ("region", "VARCHAR"),
     ("year", "INTEGER"),
     ("quarter", "INTEGER"),
     ("price_classification", "VARCHAR"),
@@ -32,7 +37,7 @@ TRANSACTION_COLUMNS: list[tuple[str, str]] = [
     ("row_index", "INTEGER"),
     ("price_category", "VARCHAR"),
     ("property_type", "VARCHAR"),
-    ("region", "VARCHAR"),
+    ("land_area_type", "VARCHAR"),
     ("prefecture", "VARCHAR"),
     ("municipality", "VARCHAR"),
     ("municipality_code", "VARCHAR"),
@@ -68,7 +73,7 @@ TRANSACTION_COLUMNS: list[tuple[str, str]] = [
 
 _FETCH_LOG_COLUMNS = [
     ("fetched_at", "TIMESTAMPTZ"),
-    ("city", "VARCHAR"),
+    ("region", "VARCHAR"),
     ("year", "INTEGER"),
     ("quarter", "INTEGER"),
     ("price_classification", "VARCHAR"),
@@ -98,8 +103,22 @@ class DuckDBStore:
         if isinstance(path, Path):
             path.parent.mkdir(parents=True, exist_ok=True)
         self.con = duckdb.connect(str(path))
-        self.con.execute(_ddl("transactions", TRANSACTION_COLUMNS, ',\n  PRIMARY KEY ("raw_file", "row_index")'))
-        self.con.execute(_ddl("fetch_log", _FETCH_LOG_COLUMNS))
+        self._create("transactions", TRANSACTION_COLUMNS, ',\n  PRIMARY KEY ("raw_file", "row_index")')
+        self._create("fetch_log", _FETCH_LOG_COLUMNS)
+
+    def _create(self, table: str, columns: list[tuple[str, str]], extra: str = "") -> None:
+        """表格不存在就建立；欄位和程式不一致（舊版本建的）就砍掉重建。
+
+        資料庫的內容全部可以由 data/raw 重新 load，所以重建不會遺失任何東西。
+        """
+        existing = self.con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ? ORDER BY ordinal_position",
+            [table],
+        ).fetchall()
+        if existing and [c for (c,) in existing] != [name for name, _ in columns]:
+            logger.warning("%s 的欄位和目前版本不同，重建（請重新執行 load）", table)
+            self.con.execute(f"DROP TABLE {table}")
+        self.con.execute(_ddl(table, columns, extra))
 
     def close(self) -> None:
         self.con.close()
@@ -112,43 +131,56 @@ class DuckDBStore:
 
     def replace_files(
         self,
-        rows_by_file: Mapping[str, Iterable[Mapping[str, Any]]],
+        rows_by_file: Mapping[str, Iterable[Mapping[str, Any]]] | Iterable[tuple[str, Iterable[Mapping[str, Any]]]],
         loaded_at: datetime,
         prune_others: bool = False,
     ) -> int:
         """每個原始檔：先刪掉它舊的資料，再插入新的。全部在同一個 transaction 裡，失敗就整批還原。
 
-        prune_others=True：rows_by_file 裡沒有的原始檔，資料也一併刪掉
+        rows_by_file 可以是 dict，也可以是 (原始檔名, rows) 的串流（generator），
+        東京都全域幾十萬筆時不用一次全部放在記憶體裡。
+        prune_others=True：這次沒出現的原始檔，資料也一併刪掉
         （原始檔被刪了，資料庫也要跟著消失；用在「整個 data/raw 重新載入」的時候）。
+
+        executemany 實測只有每秒約 300 筆，所以先把 rows 寫成暫存 NDJSON，
+        再用 DuckDB 的 read_json 一次 INSERT（欄位型別照 TRANSACTION_COLUMNS 指定）。
         """
+        items = rows_by_file.items() if isinstance(rows_by_file, Mapping) else rows_by_file
         names = [name for name, _ in TRANSACTION_COLUMNS]
-        placeholders = ", ".join("?" for _ in names)
-        column_list = ", ".join(f'"{n}"' for n in names)
-        insert = f"INSERT INTO transactions ({column_list}) VALUES ({placeholders})"
+        stamp = loaded_at.isoformat(sep=" ")
+        files: list[str] = []
         inserted = 0
-        self.con.begin()
-        try:
-            if prune_others:
-                keep = list(rows_by_file)
-                if keep:
-                    self.con.execute("DELETE FROM transactions WHERE NOT list_contains(?, raw_file)", [keep])
-                else:
-                    self.con.execute("DELETE FROM transactions")
-            for raw_file, rows in rows_by_file.items():
-                self.con.execute("DELETE FROM transactions WHERE raw_file = ?", [raw_file])
-                values = []
-                for row in rows:
-                    # 刪除用的是 key，寫入用的是 row 裡的 raw_file，兩者不一致就會刪不乾淨
-                    if row["raw_file"] != raw_file:
-                        raise ValueError(f"raw_file 不一致：{row['raw_file']!r} 放在 {raw_file!r} 底下")
-                    values.append([row[n] for n in names[:-1]] + [loaded_at])
-                if values:
-                    self.con.executemany(insert, values)
-                inserted += len(values)
-            self.con.commit()
-        except BaseException:
-            self.con.rollback()
-            raise
+        with tempfile.TemporaryDirectory() as tmp:
+            ndjson = Path(tmp) / "rows.ndjson"
+            with ndjson.open("w", encoding="utf-8") as out:
+                for raw_file, rows in items:
+                    files.append(raw_file)
+                    for row in rows:
+                        # 刪除用的是 key，寫入用的是 row 裡的 raw_file，兩者不一致就會刪不乾淨
+                        if row["raw_file"] != raw_file:
+                            raise ValueError(f"raw_file 不一致：{row['raw_file']!r} 放在 {raw_file!r} 底下")
+                        record = {n: row[n] for n in names[:-1]}
+                        record["loaded_at"] = stamp
+                        out.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        inserted += 1
+
+            columns = "{" + ", ".join(f"'{n}': '{t}'" for n, t in TRANSACTION_COLUMNS) + "}"
+            column_list = ", ".join(f'"{n}"' for n in names)
+            self.con.begin()
+            try:
+                if prune_others:
+                    self.con.execute("DELETE FROM transactions WHERE NOT list_contains(?, raw_file)", [files])
+                self.con.execute("DELETE FROM transactions WHERE list_contains(?, raw_file)", [files])
+                if inserted:
+                    self.con.execute(
+                        f"INSERT INTO transactions ({column_list}) SELECT {column_list} FROM "
+                        f"read_json(?, format = 'newline_delimited', columns = {columns})",
+                        [str(ndjson)],
+                    )
+                self.con.commit()
+            except BaseException:
+                self.con.rollback()
+                raise
         return inserted
 
     def replace_fetch_log(self, log_path: Path) -> int:
@@ -163,7 +195,8 @@ class DuckDBStore:
             if entries:
                 self.con.executemany(
                     f"INSERT INTO fetch_log VALUES ({', '.join('?' for _ in names)})",
-                    [[e[n] for n in names] for e in entries],
+                    # M1 時期的紀錄用 city 而不是 region
+                    [[e.get(n, e.get("city")) if n == "region" else e[n] for n in names] for e in entries],
                 )
             self.con.commit()
         except BaseException:

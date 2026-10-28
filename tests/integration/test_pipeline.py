@@ -15,8 +15,9 @@ import pytest
 from conftest import FAKE_KEY, FIXTURES, FakeClock
 from tokyo_housing_lab.config import ApiKey, load_api_key
 from tokyo_housing_lab.pipeline import load_raw_dir
-from tokyo_housing_lab.sources.raw_store import RawStore
+from tokyo_housing_lab.sources.raw_store import RawStore, read_raw_bytes
 from tokyo_housing_lab.sources.reinfolib_api import ReinfolibClient, fetch_range
+from tokyo_housing_lab.sources.reinfolib_records import query_from_filename
 from tokyo_housing_lab.storage.duckdb_store import DuckDBStore
 
 TACHIKAWA = "13202"
@@ -25,13 +26,16 @@ TACHIKAWA = "13202"
 def expected_medians(raw_dir):
     """不經過我們的清理程式，直接從原始 JSON 算：(年, 季, 種類) → (中位數, 筆數)。"""
     result = {}
-    for path in sorted(raw_dir.glob("xit001_*.json")):
-        _, _, period, pc = path.stem.split("_")
-        year, quarter = int(period[:4]), int(period[5])
-        rows = [r for r in json.loads(path.read_bytes())["data"] if r["Type"] == "中古マンション等"]
+    for path in sorted(raw_dir.glob("xit001_*")):
+        q = query_from_filename(path.name)
+        rows = [
+            r
+            for r in json.loads(read_raw_bytes(path))["data"]
+            if r["Type"] == "中古マンション等" and r["MunicipalityCode"] == TACHIKAWA
+        ]
         prices = [int(r["TradePrice"]) / float(r["Area"]) for r in rows]
         if prices:
-            result[(year, quarter, pc[1:])] = (statistics.median(prices), len(prices))
+            result[(q.year, q.quarter, q.price_classification)] = (statistics.median(prices), len(prices))
     return result
 
 

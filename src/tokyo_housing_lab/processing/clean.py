@@ -94,7 +94,7 @@ def unit_price_per_m2(trade_price: Parsed, area: Parsed) -> Parsed:
 _TEXT_FIELDS = (
     "price_category",
     "property_type",
-    "region",
+    "land_area_type",
     "prefecture",
     "municipality",
     "municipality_code",
@@ -132,6 +132,7 @@ def clean_record(record: SourceRecord) -> dict[str, Any]:
     row: dict[str, Any] = {
         "source": record.source,
         "city": record.city,
+        "region": record.region,
         "year": record.year,
         "quarter": record.quarter,
         "price_classification": record.price_classification,

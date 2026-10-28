@@ -18,6 +18,7 @@ import httpx
 
 from tokyo_housing_lab.config import ApiKey
 from tokyo_housing_lab.sources.base import (
+    PRICE_CLASSIFICATION_START,
     PRICE_CLASSIFICATIONS,
     QuarterQuery,
     quarter_of,
@@ -124,7 +125,7 @@ class ReinfolibClient:
         params = {
             "year": str(query.year),
             "quarter": str(query.quarter),
-            "city": query.city,
+            query.api_param: query.region,
             "priceClassification": query.price_classification,
         }
         # 第 0 次是正式請求，之後每一次重試前先等 backoff_seconds[i]
@@ -172,7 +173,7 @@ FetchOutcome = Literal["saved", "no_data", "skipped"]
 def fetch_range(
     client: ReinfolibClient,
     store: RawStore,
-    city: str,
+    region: str,
     start: tuple[int, int],
     today: date,
     price_classifications: Sequence[str] = PRICE_CLASSIFICATIONS,
@@ -182,6 +183,7 @@ def fetch_range(
     """從 start 那一季一路抓到 today 所在的那一季，01、02 分開請求。
 
     官方沒有「最新季」的查詢方式，所以抓到今天所在的季為止，還沒公開的季會回 404。
+    各價格種類在 PRICE_CLASSIFICATION_START 之前的季不請求（官方沒有那麼早的資料）。
     已經存在的原始檔跳過，但「已有原始檔的季」裡最新的 refresh_recent 季照樣重抓；
     force=True 則全部重抓。404 不存檔，下次會再問一次，
     因為「現在還沒公開」的季之後可能就有了。
@@ -190,14 +192,16 @@ def fetch_range(
     saved = [
         (y, q)
         for y, q in quarters
-        if any(store.exists(QuarterQuery(city, y, q, pc)) for pc in price_classifications)
+        if any(store.exists(QuarterQuery(region, y, q, pc)) for pc in price_classifications)
     ]
     recent = set(saved[-refresh_recent:]) if refresh_recent > 0 else set()
 
     outcomes: list[tuple[QuarterQuery, FetchOutcome]] = []
     for year, quarter in quarters:
         for pc in price_classifications:
-            query = QuarterQuery(city, year, quarter, pc)
+            if (year, quarter) < PRICE_CLASSIFICATION_START[pc]:
+                continue
+            query = QuarterQuery(region, year, quarter, pc)
             if not force and (year, quarter) not in recent and store.exists(query):
                 logger.info("%s 已有原始檔，跳過", query.label)
                 outcomes.append((query, "skipped"))

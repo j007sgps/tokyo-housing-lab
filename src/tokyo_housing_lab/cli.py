@@ -1,6 +1,6 @@
 """命令列入口。
 
-  fetch：打 API，原始檔存到 data/raw/（已存在的跳過，最新 4 季重抓）
+  fetch：打 API，原始檔存到 data/raw/（預設東京都全域 2005Q3〜；已存在的跳過，最新 4 季重抓）
   load ：只讀 data/raw/，清理後寫進 DuckDB（不打 API）
   query：每季 ㎡ 單價中位數與筆數（只讀 DuckDB）
 """
@@ -27,6 +27,7 @@ from tokyo_housing_lab.sources.reinfolib_records import RawFileError
 from tokyo_housing_lab.storage.duckdb_store import DuckDBStore
 
 TACHIKAWA = "13202"
+TOKYO = "13"
 
 
 def _quarter(text: str) -> tuple[int, int]:
@@ -46,7 +47,7 @@ def _fetch(args: argparse.Namespace) -> None:
         outcomes = fetch_range(
             client,
             RawStore(args.raw_dir),
-            args.city,
+            args.region,
             args.start,
             date.today(),
             force=args.force,
@@ -63,6 +64,8 @@ def _load(args: argparse.Namespace) -> None:
         f"載入完成：{summary.files} 個原始檔、{summary.records_read} 筆 → "
         f"中古マンション等 {summary.rows_loaded} 筆寫入 {args.db}（fetch_log {summary.fetch_log_entries} 筆）"
     )
+    if summary.skipped_files:
+        print(f"跳過 {len(summary.skipped_files)} 個原始檔（內容已包含在東京都全域的檔案裡）")
 
 
 PRICE_LABELS = {"01": "取引", "02": "成約"}
@@ -92,8 +95,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     fetch = sub.add_parser("fetch", help="從 API 抓原始資料到 data/raw/", epilog=DISCLAIMER)
-    fetch.add_argument("--city", default=TACHIKAWA, help="市區町村代碼（預設 13202 立川市）")
-    fetch.add_argument("--start", type=_quarter, default=(2021, 1), help="從哪一季開始，例如 2021Q1")
+    fetch.add_argument(
+        "--region",
+        default=TOKYO,
+        help="2 碼＝都道府縣、5 碼＝市區町村（預設 13 東京都全域；立川市是 13202）",
+    )
+    fetch.add_argument("--start", type=_quarter, default=(2005, 3), help="從哪一季開始（預設 2005Q3，官方最早的一季）")
     fetch.add_argument("--force", action="store_true", help="已有原始檔的季也全部重抓")
     fetch.add_argument(
         "--refresh-recent",
