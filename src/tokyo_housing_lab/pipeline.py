@@ -5,9 +5,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tokyo_housing_lab.processing import stations as st
 from tokyo_housing_lab.processing.clean import clean_record
 from tokyo_housing_lab.processing.filter import is_used_condo
-from tokyo_housing_lab.sources.raw_store import FETCH_LOG_NAME
+from tokyo_housing_lab.sources.raw_store import FETCH_LOG_NAME, read_raw_bytes
+from tokyo_housing_lab.sources.reinfolib_points import parse_xkt015, parse_xpt001
 from tokyo_housing_lab.sources.reinfolib_records import query_from_filename, read_raw_file
 from tokyo_housing_lab.storage.duckdb_store import DuckDBStore
 
@@ -73,3 +75,58 @@ def load_raw_dir(raw_dir: Path, store: DuckDBStore) -> LoadSummary:
     rows_loaded = store.replace_files(rows_by_file(), loaded_at, prune_others=True)
     log_entries = store.replace_fetch_log(raw_dir / FETCH_LOG_NAME)
     return LoadSummary(len(paths), records_read, rows_loaded, log_entries, tuple(p.name for p in skipped))
+
+
+@dataclass(frozen=True)
+class StationLoadSummary:
+    tiles: int  # 讀了幾個圖磚檔
+    stations: int  # 有名字的車站
+    unknown_stations: int  # 對不到車站的點（名稱不明）
+    points: int  # 東京都內的成交點
+    matched: int  # 對上 XIT001 的成交筆數
+    candidates: int  # 同期間（成交點有資料的年）東京都中古マンション的成交筆數
+
+
+def load_station_tiles(raw_dir: Path, store: DuckDBStore, region: str = "13") -> StationLoadSummary | None:
+    """data/raw/tiles/ → 車站、路線順序、成交點、成交 → 車站。沒有這個資料夾就什麼都不做。"""
+    from tokyo_housing_lab.sources.reinfolib_tiles import TILE_DIR
+
+    tile_dir = raw_dir / TILE_DIR
+    station_files = sorted(tile_dir.glob("xkt015_*.json.gz"))
+    point_files = sorted(tile_dir.glob("xpt001_*.json.gz"))
+    if not station_files:
+        return None
+    segments = [seg for path in station_files for seg in parse_xkt015(read_raw_bytes(path))]
+    points = []
+    for path in point_files:
+        found = parse_xpt001(read_raw_bytes(path), region)
+        logger.info("%s：東京都內的成交點 %d 筆", path.name, len(found))
+        points += found
+    stations = st.build_stations(segments)
+    ids, unknown = st.assign_points(points, segments)
+    station_rows = [
+        {
+            "station_id": s.station_id, "name": s.name, "lines": [f"{o}／{ln}" for o, ln in s.lines],
+            "lon": s.lon, "lat": s.lat, "passengers": s.passengers, "passengers_year": s.passengers_year,
+        }
+        for s in stations + unknown
+    ]  # fmt: skip
+    line_rows = [
+        {"operator": o, "line": ln, "station_id": sid, "seq": seq} for o, ln, sid, seq in st.station_lines(segments)
+    ]
+    point_rows = (
+        {
+            "year": p.year, "quarter": p.quarter, "price_classification": p.price_classification, "city": p.city,
+            "district_code": p.district_code, "trade_price": p.trade_price, "area": p.area,
+            "building_year": p.building_year, "floor_plan": p.floor_plan, "structure": p.structure, "station_id": sid,
+        }
+        for p, sid in zip(points, ids, strict=True)
+    )  # fmt: skip
+    matched = store.replace_stations(station_rows, line_rows, point_rows)
+    years = sorted({p.year for p in points})
+    candidates = (
+        store.query("condo_count", region=region, first_year=years[0], last_year=years[-1])[0]["n"] if years else 0
+    )
+    return StationLoadSummary(
+        len(station_files) + len(point_files), len(stations), len(unknown), len(points), matched, candidates
+    )

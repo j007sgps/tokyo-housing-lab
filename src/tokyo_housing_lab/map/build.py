@@ -13,8 +13,11 @@ from typing import Any
 
 from tokyo_housing_lab import DISCLAIMER
 from tokyo_housing_lab.analysis.municipalities import COMBINED, HEDONIC, INVEST_PRICE_CLASSIFICATION, Analysis
+from tokyo_housing_lab.analysis.stations import StationAnalysis, line_label, operator_label
 from tokyo_housing_lab.analysis.trend import (
     INVEST_MAX_CI_WIDTH,
+    growth_between,
+    long_term_trend,
     INVEST_MIN_YEARS,
     INVEST_WINDOW_YEARS,
     MIN_N,
@@ -29,7 +32,11 @@ BOUNDARY_CREDIT = (
     "「国土数値情報（行政区域データ）」（国土交通省）（https://nlftp.mlit.go.jp/ksj/）を加工して作成"
     "（スマートニュース メディア研究所 japan-topography の簡略化データを使用）"
 )
+STATION_CREDIT = "「国土数値情報（駅別乗降客数データ）」（国土交通省）（https://nlftp.mlit.go.jp/ksj/）を加工して作成"
 NOT_ADVICE = "只是過去成交資料的整理，不是價格預測，也不是投資建議。"
+LINE_MIN_STATIONS = 3  # 路線圖：至少幾站有成交，才放進選單
+LINE_GROUP_ORDER = ["JR", "東京メトロ", "都営"]  # 路線選單的分組順序；其他公司依名稱
+TREND_DEFAULT_SHARE = 0.8  # 車站趨勢模式的預設起年：能比較的車站數達到最多時的這個比例、最早的一年
 DATA_PLACEHOLDER = "/*__MAP_DATA__*/null"
 
 
@@ -57,7 +64,81 @@ def _invest(t: LongTrend | None) -> dict[str, Any] | None:
     return {"annual": _r(t.annual), "low": _r(t.ci_low), "high": _r(t.ci_high), "years": t.years_used, "status": t.status}
 
 
-def build_map_data(analysis: Analysis, generated: date) -> dict[str, Any]:
+def _yearly(stats: dict) -> list[list[int]]:
+    return [[y, s.n, round(s.median)] for y, s in sorted(stats.items())]
+
+
+def _growth_pairs(series: dict, years: list[int]) -> dict[str, list]:
+    pairs = {}
+    for start, end in combinations(years, 2):
+        g = growth_between(series, start, end)
+        if g.status != "insufficient":
+            pairs[f"{start}-{end}"] = [_r(g.total), _r(g.ci_low), _r(g.ci_high), int(g.status == "uncertain")]
+    return pairs
+
+
+def build_station_data(sa: StationAnalysis) -> dict[str, Any]:
+    """車站圖層和路線圖的數字。只放有成交的車站，和選單裡的路線上的車站（沒成交的只有名稱和位置）。"""
+    with_data = {sid for sid, r in sa.stations.items() if r.cities}
+    lines = []
+    for key, ids in sa.lines.items():
+        if sum(i in with_data for i in ids) >= LINE_MIN_STATIONS:
+            lines.append({"key": key, "label": line_label(key), "group": operator_label(key), "ids": ids})
+
+    def order(ln: dict) -> tuple:
+        g = ln["group"]
+        rank = LINE_GROUP_ORDER.index(g) if g in LINE_GROUP_ORDER else len(LINE_GROUP_ORDER)
+        return (rank, g, -sum(i in with_data for i in ln["ids"]), ln["label"])
+
+    lines.sort(key=order)
+    needed = with_data | {i for ln in lines for i in ln["ids"]}
+    stations = {}
+    for sid in sorted(needed):
+        r = sa.stations[sid]
+        i = r.info
+        s: dict[str, Any] = {
+            "name": i.name,
+            "lines": [line_label(k) for k in i.lines],
+            "lon": round(i.lon, 5),
+            "lat": round(i.lat, 5),
+            "pax": i.passengers,
+            "paxYear": i.passengers_year,
+        }
+        if r.cities:
+            s |= {
+                "city": r.city,
+                "cities": r.cities,
+                "total": sum(r.cities.values()),
+                "yearly": _yearly(r.yearly),
+                "latest": _price(r.latest),
+                "growth": _growth_pairs(r.yearly, sa.years),
+                "invest": _invest(r.invest),
+            }
+        stations[sid] = s
+    last = max(sa.years) if sa.years else None
+    # 2020 年以前只有取引（成約 2021 年起），起年太早的話大部分車站筆數不夠
+    counts = {y: sum(f"{y}-{last}" in s.get("growth", {}) for s in stations.values()) for y in sa.years[:-1]}
+    best = max(counts.values(), default=0)
+    start = min((y for y, c in counts.items() if c >= TREND_DEFAULT_SHARE * best), default=None)
+    return {
+        "years": sa.years,
+        "investWindow": None if last is None else [last - INVEST_WINDOW_YEARS + 1, last],
+        "trendDefault": None if start is None else [start, last],
+        "latestPeriod": _period(sa.latest_period),
+        "target": sa.target,
+        "standard": sa.standard,
+        "n": sa.n,
+        "lines": lines,
+        "cityLatest": {c: _price(p) for c, p in sa.city_latest.items()},
+        # 所在區的比較：同方法（標準化價格的中位數），不是地圖上區的品質調整指數
+        "cityYearly": {c: _yearly(ys) for c, ys in sa.city_yearly.items()},
+        "cityGrowth": {c: _growth_pairs(ys, sa.years) for c, ys in sa.city_yearly.items()},
+        "cityInvest": {c: _invest(long_term_trend(ys, last)) if last else None for c, ys in sa.city_yearly.items()},
+        "list": stations,
+    }
+
+
+def build_map_data(analysis: Analysis, generated: date, stations: StationAnalysis | None = None) -> dict[str, Any]:
     """地圖要的全部數字。漲幅只放「兩年都達到樣本門檻」的組合，沒放的就是樣本不足。
 
     價格種類除了 "01"／"02"，還有 "combined"（綜合：取引＋換算成取引水準的成約，以取引為主軸）
@@ -150,8 +231,14 @@ def build_map_data(analysis: Analysis, generated: date) -> dict[str, Any]:
             "investMinYears": INVEST_MIN_YEARS,
             "investMaxCiWidth": INVEST_MAX_CI_WIDTH,
         },
-        "text": {"disclaimer": DISCLAIMER, "boundaryCredit": BOUNDARY_CREDIT, "notAdvice": NOT_ADVICE},
+        "text": {
+            "disclaimer": DISCLAIMER,
+            "boundaryCredit": BOUNDARY_CREDIT,
+            "stationCredit": STATION_CREDIT,
+            "notAdvice": NOT_ADVICE,
+        },
         "municipalities": municipalities,
+        "stations": None if stations is None else build_station_data(stations),
     }
 
 
@@ -171,13 +258,13 @@ _STANDALONE_HEAD = (
 )
 
 
-def render_html(analysis: Analysis, generated: date, standalone: bool = True) -> str:
+def render_html(analysis: Analysis, generated: date, standalone: bool = True, stations: StationAnalysis | None = None) -> str:
     """standalone=True：完整的 HTML 文件，瀏覽器直接打開。
     False：只有內容片段（給會自己包上 <html>／<head> 的地方用，例如 claude.ai 的 Artifact）。
     """
     template = files("tokyo_housing_lab.map").joinpath("template.html").read_text(encoding="utf-8")
     if template.count(DATA_PLACEHOLDER) != 1:
         raise RuntimeError("template.html 裡的資料佔位字串必須剛好一個")
-    payload = {"data": build_map_data(analysis, generated), "boundaries": _boundaries()}
+    payload = {"data": build_map_data(analysis, generated, stations), "boundaries": _boundaries()}
     html = template.replace(DATA_PLACEHOLDER, _embed(payload))
     return _STANDALONE_HEAD + html + "\n</body>\n</html>\n" if standalone else html

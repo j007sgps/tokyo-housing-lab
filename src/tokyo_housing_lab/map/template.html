@@ -4,7 +4,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Shippori+Mincho+B1:wght@600&display=swap">
 <style>
-  /* 版面：上方控制列 → 地圖（左）＋詳細面板（右，窄螢幕時移到下方）→ 排行 → 說明 */
+  /* 版面：上方控制列 → 地圖（左）＋詳細面板（右，窄螢幕時移到下方）→ 路線圖 → 排行 → 說明 */
   :root {
     --bg: #eef1f4;
     --panel: #ffffff;
@@ -14,6 +14,7 @@
     --accent: #1f5f8b;
     --accent-ink: #ffffff;
     --na: #c7cdd4;
+    --ward: #e4e9ee;
     --hatch: rgba(22, 32, 43, 0.55);
     --boundary: #ffffff;
     --warn: #a3620a;
@@ -25,13 +26,13 @@
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: #0f141a; --panel: #18202a; --fg: #e5eaf0; --muted: #98a4b1; --line: #2a3542;
-      --accent: #7db3e3; --accent-ink: #0f141a; --na: #39434e; --hatch: rgba(229, 234, 240, 0.6); --boundary: #0f141a; --warn: #e3a64a; --hed: #c79be6;
+      --accent: #7db3e3; --accent-ink: #0f141a; --na: #39434e; --ward: #212b36; --hatch: rgba(229, 234, 240, 0.6); --boundary: #0f141a; --warn: #e3a64a; --hed: #c79be6;
       color-scheme: dark;
     }
   }
   :root[data-theme="dark"] {
     --bg: #0f141a; --panel: #18202a; --fg: #e5eaf0; --muted: #98a4b1; --line: #2a3542;
-    --accent: #7db3e3; --accent-ink: #0f141a; --na: #39434e; --hatch: rgba(229, 234, 240, 0.6); --boundary: #0f141a; --warn: #e3a64a; --hed: #c79be6;
+    --accent: #7db3e3; --accent-ink: #0f141a; --na: #39434e; --ward: #212b36; --hatch: rgba(229, 234, 240, 0.6); --boundary: #0f141a; --warn: #e3a64a; --hed: #c79be6;
     color-scheme: dark;
   }
   body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.6; }
@@ -42,24 +43,32 @@
   .tm-head h1 { margin: 0; font-family: var(--font-display); font-weight: 600; font-size: clamp(1.6rem, 4vw, 2.2rem); letter-spacing: .04em; text-wrap: balance; }
   .tm-head p { margin: 4px 0 0; color: var(--muted); font-size: .9rem; }
   .tm-controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: end; }
-  .tm-field { display: flex; flex-direction: column; gap: 4px; }
+  .tm-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
   .tm-label { font-size: .75rem; color: var(--muted); letter-spacing: .06em; }
   .tm-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); padding: 3px; }
   .tm-seg button { border: 0; background: transparent; color: var(--fg); font: inherit; font-size: .9rem; padding: 5px 14px; border-radius: 999px; cursor: pointer; }
   .tm-seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); font-weight: 500; }
   .tm-seg button:disabled { color: var(--muted); cursor: not-allowed; opacity: .55; }
-  .tm-seg button:focus-visible, .tm select:focus-visible, .tm-rank button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .tm select { font: inherit; font-size: .9rem; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
+  .tm-seg button:focus-visible, .tm select:focus-visible, .tm-rank button:focus-visible, .tm-zoom button:focus-visible, .tm-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .tm select { font: inherit; font-size: .9rem; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; max-width: 100%; }
   .tm-years { display: flex; align-items: center; gap: 6px; }
-  .tm-explain { margin: 0; color: var(--muted); font-size: .88rem; max-width: 70ch; }
+  .tm-explain { margin: 0; color: var(--muted); font-size: .88rem; max-width: 76ch; }
   .tm-main { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 16px; align-items: start; }
   @media (max-width: 860px) { .tm-main { grid-template-columns: minmax(0, 1fr); } }
   .tm-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; min-width: 0; }
+  .tm-card > h3 { margin: 0 0 8px; font-size: .95rem; font-weight: 500; }
   .tm-map { position: relative; }
-  .tm-map svg { display: block; width: 100%; height: auto; }
-  .tm-map path.area { stroke: var(--boundary); stroke-width: .8; cursor: pointer; }
+  .tm-map svg { display: block; width: 100%; height: auto; touch-action: pan-x pan-y; }
+  .tm-map path.area { stroke: var(--boundary); stroke-width: .8; cursor: pointer; vector-effect: non-scaling-stroke; }
   .tm-map path.area:hover { stroke: var(--fg); stroke-width: 1.4; }
-  .tm-map path.selected { stroke: var(--fg); stroke-width: 2.4; }
+  .tm-map path.ward { cursor: default; }
+  .tm-map path.ward:hover { stroke: var(--boundary); stroke-width: .8; }
+  .tm-map circle.st { stroke: var(--panel); stroke-width: .8; cursor: pointer; vector-effect: non-scaling-stroke; }
+  .tm-map circle.st:hover { stroke: var(--fg); stroke-width: 1.6; }
+  .tm-map .route { fill: none; stroke: var(--muted); stroke-width: 2; stroke-linejoin: round; vector-effect: non-scaling-stroke; opacity: .7; }
+  .tm-zoom { position: absolute; top: 20px; right: 20px; display: flex; gap: 4px; z-index: 2; }
+  .tm-zoom button { font: inherit; font-size: .8rem; min-width: 30px; height: 30px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px;
+                    background: var(--panel); color: var(--fg); cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,.12); }
   .tm-tip { position: absolute; pointer-events: none; z-index: 3; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
             box-shadow: 0 4px 16px rgba(0,0,0,.15); padding: 6px 10px; font-size: .82rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .tm-tip b { display: block; font-weight: 500; }
@@ -68,6 +77,7 @@
   .tm-legend text { fill: var(--muted); font-size: 11px; font-family: var(--font-body); }
   .tm-key { display: inline-flex; align-items: center; gap: 6px; }
   .tm-swatch { width: 18px; height: 12px; border-radius: 2px; border: 1px solid var(--line); }
+  .tm-swatch.round { width: 12px; border-radius: 50%; }
   .tm-panel h2 { margin: 0; font-family: var(--font-display); font-weight: 600; font-size: 1.5rem; }
   .tm-panel h3 { margin: 14px 0 4px; font-size: .85rem; font-weight: 500; color: var(--muted); letter-spacing: .04em; }
   .tm-big { font-size: 2rem; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.2; }
@@ -79,17 +89,27 @@
   .tm-warn { margin: 10px 0 0; font-size: .82rem; padding: 8px 10px; border-radius: 8px; border-left: 3px solid var(--warn);
              background: color-mix(in srgb, var(--warn) 12%, transparent); }
   .tm-warn b { color: var(--warn); font-weight: 500; }
+  .tm-cmp { margin: 10px 0 0; font-size: .88rem; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--accent) 9%, transparent); font-variant-numeric: tabular-nums; }
+  .tm-cmp b { font-weight: 500; }
+  .tm-link { font: inherit; font-size: .85rem; color: var(--accent); background: none; border: 0; padding: 0; margin-top: 8px; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
   .tm-kv { width: 100%; border-collapse: collapse; font-size: .85rem; font-variant-numeric: tabular-nums; }
   .tm-kv th, .tm-kv td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: right; }
   .tm-kv th:first-child, .tm-kv td:first-child { text-align: left; }
   .tm-kv th { font-weight: 500; color: var(--muted); font-size: .75rem; }
   .tm-chart svg { display: block; width: 100%; height: auto; overflow: visible; }
-  .tm-chart text { fill: var(--muted); font-size: 11px; font-family: var(--font-body); }
+  .tm-chart text, .tm-linechart text { fill: var(--muted); font-size: 11px; font-family: var(--font-body); }
+  .tm-linechart { overflow-x: auto; }
+  .tm-linechart svg { display: block; }
+  .tm-linechart .pt { cursor: pointer; }
+  .tm-linechart text.name { fill: var(--fg); cursor: pointer; }
+  .tm-linechart text.name.dim { fill: var(--muted); }
+  .tm-linechart text.name.sel { font-weight: 700; }
   .tm-rank { max-height: 26rem; overflow: auto; }
   .tm-rank table { width: 100%; border-collapse: collapse; font-size: .88rem; font-variant-numeric: tabular-nums; }
   .tm-rank th { position: sticky; top: 0; background: var(--panel); text-align: right; font-weight: 500; color: var(--muted); font-size: .75rem; padding: 6px; border-bottom: 1px solid var(--line); }
   .tm-rank td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: right; }
   .tm-rank th:nth-child(2), .tm-rank td:nth-child(2) { text-align: left; }
+  .tm-rank td small { color: var(--muted); margin-left: 6px; font-size: .75rem; }
   .tm-rank button { font: inherit; color: var(--fg); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
   .tm-rank tr.selected td { background: color-mix(in srgb, var(--accent) 14%, transparent); }
   .tm-rank tr.dim td { color: var(--muted); }
@@ -109,6 +129,14 @@
   </header>
 
   <section class="tm-controls" aria-label="顯示設定">
+    <div class="tm-field" id="view-field">
+      <span class="tm-label">顯示</span>
+      <div class="tm-seg" role="group" aria-label="顯示">
+        <button type="button" id="view-city" data-view="city" aria-pressed="true">行政區</button>
+        <button type="button" id="view-station" data-view="station" aria-pressed="false">車站</button>
+        <button type="button" id="view-line" data-view="line" aria-pressed="false">路線</button>
+      </div>
+    </div>
     <div class="tm-field">
       <span class="tm-label">模式</span>
       <div class="tm-seg" role="group" aria-label="模式">
@@ -117,7 +145,7 @@
         <button type="button" id="mode-invest" data-mode="invest" aria-pressed="false">投資</button>
       </div>
     </div>
-    <div class="tm-field">
+    <div class="tm-field" id="pc-field">
       <span class="tm-label">價格種類</span>
       <div class="tm-seg" role="group" aria-label="價格種類">
         <button type="button" id="pc-hedonic" data-pc="hedonic" aria-pressed="true">品質調整</button>
@@ -125,6 +153,10 @@
         <button type="button" id="pc-01" data-pc="01" aria-pressed="false">取引價格</button>
         <button type="button" id="pc-02" data-pc="02" aria-pressed="false">成約價格</button>
       </div>
+    </div>
+    <div class="tm-field" id="line-field" hidden>
+      <label class="tm-label" for="line-select">路線</label>
+      <select id="line-select"></select>
     </div>
     <div class="tm-field" id="years-field">
       <span class="tm-label">比較期間</span>
@@ -139,21 +171,34 @@
 
   <div class="tm-main">
     <section class="tm-card tm-map" aria-label="地圖">
+      <div class="tm-zoom" id="zoom" hidden>
+        <button type="button" id="zoom-in" aria-label="放大">＋</button>
+        <button type="button" id="zoom-out" aria-label="縮小">−</button>
+        <button type="button" id="zoom-ku">區部</button>
+        <button type="button" id="zoom-all">全東京</button>
+      </div>
       <div id="map"></div>
       <div class="tm-legend" id="legend"></div>
     </section>
     <aside class="tm-card tm-panel" id="panel" aria-live="polite"></aside>
   </div>
 
+  <section class="tm-card" id="line-card" aria-label="路線圖" hidden>
+    <h3 id="line-title">路線圖</h3>
+    <div class="tm-linechart" id="line-chart"></div>
+    <p class="tm-sub" id="line-note" style="margin:8px 0 0;">—</p>
+  </section>
+
   <section class="tm-card" aria-label="排行">
-    <h3 style="margin:0 0 8px;font-size:.95rem;font-weight:500;" id="rank-title">排行</h3>
-    <div class="tm-rank"><table><thead><tr><th>#</th><th>市區町村</th><th id="rank-col">值</th><th>95% 區間</th><th>筆數</th></tr></thead><tbody id="rank-body"></tbody></table></div>
+    <h3 id="rank-title">排行</h3>
+    <div class="tm-rank"><table><thead><tr><th>#</th><th id="rank-name">市區町村</th><th id="rank-col">值</th><th>95% 區間</th><th>筆數</th></tr></thead><tbody id="rank-body"></tbody></table></div>
   </section>
 
   <footer class="tm-notes">
     <p><strong>怎麼算的</strong>：中古マンション等的 ㎡ 單價（成交價 ÷ 面積）中位數。購買模式用最新 4 季；趨勢模式比較起年與迄年的年度中位數；投資模式用最近 10 個完整年的年度中位數取對數做最小平方法，得到每年的平均成長率。所有數字都附 95% 區間。</p>
     <p><strong>品質調整</strong>：<span id="note-hedonic">—</span></p>
     <p><strong>綜合</strong>：取引價格（2005 年起）與成約價格（2021 年起，透過仲介的成交）合在一起的指標。同一區、同一年，兩者的中位數有落差（各區不同），所以先用 2021 年以後兩邊都有的年份估計每區的落差，把成約換算成取引的水準，再依誤差大小加權平均；2020 年以前只有取引。落差每年變動越大，成約的權重越小。數字以<strong>取引價格的水準</strong>表示。同一筆成交可能同時出現在兩邊（API 沒有交易 ID，無法去除重複），所以綜合的區間會稍微偏窄。</p>
+    <p id="note-station-wrap"><strong>車站</strong>：<span id="note-station">—</span></p>
     <p><strong>灰色與斜線</strong>：<span id="note-thresholds">—</span></p>
     <p><strong>限制</strong>：中位數會受「那年賣出的物件組成」（新舊、大小、地點）影響，還沒做時點修正或品質調整；API 的面積已四捨五入到 5㎡。<span id="note-advice">—</span></p>
     <p id="note-disclaimer">—</p>
@@ -168,18 +213,42 @@
   const { data, boundaries } = JSON.parse(document.getElementById("map-data").textContent);
   const M = data.municipalities;
   const T = data.thresholds;
+  const S = data.stations; // 車站資料（沒跑 fetch-stations 時是 null）
+  const SL = S ? S.list : {};
+  const lineByKey = S ? Object.fromEntries(S.lines.map((l) => [l.key, l])) : {};
   const DEFAULT_CITY = "13104"; // 一打開先選新宿区，面板就有內容
+  const DEFAULT_LINE = "東日本旅客鉄道／中央線";
+  const KU_MAX = "13123"; // 23 區的代碼是 13101〜13123
+  const dataStations = Object.keys(SL).filter((id) => SL[id].latest);
 
   // ---- 狀態 ----
   const pts = data.priceTypes;
   const years01 = pts["01"].completeYears;
+  const biggestIn = (ids) => ids.filter((id) => SL[id] && SL[id].latest).sort((a, b) => SL[b].total - SL[a].total)[0];
   const state = {
+    view: "city", // city／station／line
     mode: "trend",
     pc: pts.hedonic ? "hedonic" : pts.combined ? "combined" : "01",
     start: years01[Math.max(0, years01.length - 11)],
     end: years01[years01.length - 1],
     selected: M[DEFAULT_CITY] ? DEFAULT_CITY : Object.keys(M)[0],
+    line: S && S.lines.length ? (lineByKey[DEFAULT_LINE] ? DEFAULT_LINE : S.lines[0].key) : null,
+    station: S ? biggestIn(dataStations.filter((id) => SL[id].city === DEFAULT_CITY)) || biggestIn(dataStations) : null,
   };
+  const stationView = () => state.view !== "city";
+  // 比較期間：行政區和車站各記各的（車站的資料年份不同，預設期間也不同）
+  const savedYears = { city: null, station: S && S.trendDefault };
+  function setView(view) {
+    const from = stationView() ? "station" : "city";
+    state.view = view;
+    const to = stationView() ? "station" : "city";
+    if (from !== to) {
+      savedYears[from] = [state.start, state.end];
+      if (savedYears[to]) [state.start, state.end] = savedYears[to];
+    }
+    if (view === "line" && !lineByKey[state.line].ids.includes(state.station)) state.station = biggestIn(lineByKey[state.line].ids);
+  }
+  const zoomOf = { city: null, station: null, line: null }; // 各顯示方式的縮放（null = 預設範圍）
 
   // ---- 格式 ----
   const man = (yen) => (yen / 10000).toFixed(1);
@@ -187,33 +256,51 @@
   const fmtN = d3.format(",");
   const pcLabel = (pc) => ({ hedonic: "品質調整，典型物件", combined: "綜合，取引水準" })[pc] || pts[pc].label;
   const nameOf = (code, fallback) => (M[code] ? M[code].name.replace(/^西多摩郡/, "") : fallback);
+  const lineLabel = () => (state.line ? lineByKey[state.line].label : "");
 
   // ---- 每個模式的值：{v, lo, hi, n, status} ----
-  function valueOf(code) {
-    const m = M[code];
-    if (!m) return { status: "insufficient", n: 0 };
+  // src = {latest, growth, yearly, invest}：區（某價格種類）、車站、車站比較用的區，格式都一樣
+  function valueFrom(src) {
+    if (!src) return { status: "insufficient", n: 0 };
     if (state.mode === "buy") {
-      const p = m.latest[state.pc];
+      const p = src.latest;
       if (!p) return { status: "insufficient", n: 0 };
       return { v: p.median, lo: p.low, hi: p.high, n: p.n, status: p.status };
     }
     if (state.mode === "trend") {
-      const g = (m.growth[state.pc] || {})[`${state.start}-${state.end}`];
-      const yearN = (y) => ((m.yearly[state.pc] || []).find((r) => r[0] === y) || [y, 0])[1];
+      const g = (src.growth || {})[`${state.start}-${state.end}`];
+      const yearN = (y) => ((src.yearly || []).find((r) => r[0] === y) || [y, 0])[1];
       const n = `${fmtN(yearN(state.start))}／${fmtN(yearN(state.end))}`;
       if (!g) return { status: "insufficient", n };
       return { v: g[0], lo: g[1], hi: g[2], n, status: g[3] ? "uncertain" : "ok" };
     }
-    const t = m.invest[state.pc];
+    const t = src.invest;
     if (!t || t.status === "insufficient") return { status: "insufficient", n: t ? `${t.years} 年` : "0 年" };
     return { v: t.annual, lo: t.low, hi: t.high, n: `${t.years} 年`, status: t.status };
   }
+  const citySrc = (code) => M[code] && {
+    latest: M[code].latest[state.pc], growth: M[code].growth[state.pc], yearly: M[code].yearly[state.pc], invest: M[code].invest[state.pc],
+  };
+  const sameMethodCity = (code) => S && S.cityLatest[code] && {
+    latest: S.cityLatest[code], growth: S.cityGrowth[code], yearly: S.cityYearly[code], invest: S.cityInvest[code],
+  };
+  const valueOf = (code) => valueFrom(citySrc(code));
+  const valueOfStation = (id) => valueFrom(SL[id] && SL[id].latest ? SL[id] : null);
   const fmtValue = (v) => (state.mode === "buy" ? `${man(v)} 萬` : state.mode === "trend" ? pct(v) : `${pct(v)}/年`);
   const fmtRange = (lo, hi) => (state.mode === "buy" ? `${man(lo)}〜${man(hi)}` : `${pct(lo)}〜${pct(hi)}`);
 
+  // 目前顯示方式的所有項目（地圖上色、排行用）
+  function items() {
+    if (state.view === "city") return Object.keys(M).map((code) => ({ key: code, ...valueOf(code) }));
+    const ids = state.view === "line" ? lineByKey[state.line].ids : dataStations;
+    return ids.map((id) => ({ key: id, ...valueOfStation(id) }));
+  }
+
   // ---- 顏色 ----
+  // 車站：色階用全部車站的值（換路線時顏色的意思不變）
   function colorScale() {
-    const vals = Object.keys(M).map(valueOf).filter((x) => x.status !== "insufficient").map((x) => x.v);
+    const src = state.view === "city" ? Object.keys(M).map(valueOf) : dataStations.map(valueOfStation);
+    const vals = src.filter((x) => x.status !== "insufficient").map((x) => x.v);
     if (!vals.length) return () => "var(--na)";
     if (state.mode === "buy") {
       // 色階最淺的一段接近白色，會被看成「沒資料」，所以從 18% 開始
@@ -221,8 +308,10 @@
       s.kind = "seq";
       return s;
     }
-    const max = d3.max(vals, Math.abs) || 0.01;
-    const s = d3.scaleDiverging([-max, 0, max], (t) => d3.interpolateRdBu(1 - t));
+    // 車站的漲幅有少數極端值：色階到 98 百分位就飽和，不然大部分車站都很淡
+    const abs = vals.map(Math.abs).sort(d3.ascending);
+    const max = (state.view === "city" ? d3.max(abs) : d3.quantile(abs, 0.98)) || 0.01;
+    const s = d3.scaleDiverging([-max, 0, max], (t) => d3.interpolateRdBu(1 - t)).clamp(true);
     s.kind = "div";
     return s;
   }
@@ -241,55 +330,120 @@
   tip.className = "tm-tip";
   tip.hidden = true;
   mapEl.parentElement.append(tip);
+  let zoomApi = null; // drawMap 時設定：{in, out, ku, all}
+
+  function showTip(ev, title, text) {
+    tip.replaceChildren();
+    const b = document.createElement("b");
+    b.textContent = title;
+    tip.append(b, document.createTextNode(text));
+    tip.hidden = false;
+    const [px, py] = d3.pointer(ev, mapEl.parentElement);
+    const maxX = mapEl.parentElement.clientWidth - tip.offsetWidth - 4;
+    tip.style.left = `${Math.max(4, Math.min(maxX, px + 14))}px`;
+    tip.style.top = `${Math.max(4, py - 40)}px`;
+  }
+  const tipText = (x) => (x.status === "insufficient" ? "樣本不足" : fmtValue(x.v) + (x.status === "uncertain" ? "（不確定）" : ""));
 
   function drawMap() {
     const w = mapEl.clientWidth || 600;
-    const h = Math.round(w * 0.56);
+    const h = Math.round(w * (stationView() && w < 600 ? 0.9 : 0.56)); // 手機上車站很密，地圖高一點
     const proj = d3.geoMercator().fitExtent([[6, 6], [w - 6, h - 6]], boundaries);
     const path = d3.geoPath(proj);
     const color = colorScale();
     mapEl.replaceChildren();
     const svg = d3.select(mapEl).append("svg").attr("viewBox", `0 0 ${w} ${h}`).attr("role", "img")
-      .attr("aria-label", "東京都市區町村地圖");
+      .attr("aria-label", stationView() ? "東京都車站地圖" : "東京都市區町村地圖");
     const defs = svg.append("defs");
     defs.append("pattern").attr("id", "hatch").attr("width", 6).attr("height", 6)
       .attr("patternUnits", "userSpaceOnUse").attr("patternTransform", "rotate(45)")
       .append("line").attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", 6)
       .style("stroke", "var(--hatch)").attr("stroke-width", 1.6);
+    svg.append("rect").attr("width", w).attr("height", h).style("fill", "transparent"); // 空白處也能拖曳
 
     const g = svg.append("g");
     const feats = boundaries.features;
-    g.selectAll("path.area").data(feats).join("path")
-      .attr("class", (f) => "area" + (f.properties.code === state.selected ? " selected" : ""))
-      .attr("d", path)
-      .style("fill", (f) => {
-        const x = valueOf(f.properties.code);
-        return x.status === "insufficient" ? "var(--na)" : color(x.v);
-      })
-      .on("pointermove", (ev, f) => {
-        const x = valueOf(f.properties.code);
-        tip.replaceChildren();
-        const b = document.createElement("b");
-        b.textContent = nameOf(f.properties.code, f.properties.name);
-        tip.append(b, document.createTextNode(
-          x.status === "insufficient" ? "樣本不足" : fmtValue(x.v) + (x.status === "uncertain" ? "（不確定）" : "")
-        ));
-        tip.hidden = false;
-        const [px, py] = d3.pointer(ev, mapEl.parentElement);
-        const tw = tip.offsetWidth;
-        const maxX = mapEl.parentElement.clientWidth - tw - 4;
-        tip.style.left = `${Math.max(4, Math.min(maxX, px + 14))}px`;
-        tip.style.top = `${Math.max(4, py - 40)}px`;
-      })
-      .on("pointerleave", () => { tip.hidden = true; })
-      .on("click", (ev, f) => select(f.properties.code));
-    // 不確定（區間包含 0 或太寬）：上面再疊一層斜線
-    g.selectAll("path.hatch").data(feats.filter((f) => valueOf(f.properties.code).status === "uncertain")).join("path")
-      .attr("class", "hatch").attr("d", path).style("fill", "url(#hatch)").style("pointer-events", "none");
-    // 選取的區描邊畫在最上層
-    const sel = feats.find((f) => f.properties.code === state.selected);
-    if (sel) g.append("path").attr("d", path(sel)).style("fill", "none").style("stroke", "var(--fg)")
-      .attr("stroke-width", 2.4).style("pointer-events", "none");
+    let circles = null;
+    if (!stationView()) {
+      g.selectAll("path.area").data(feats).join("path")
+        .attr("class", (f) => "area" + (f.properties.code === state.selected ? " selected" : ""))
+        .attr("d", path)
+        .style("fill", (f) => {
+          const x = valueOf(f.properties.code);
+          return x.status === "insufficient" ? "var(--na)" : color(x.v);
+        })
+        .on("pointermove", (ev, f) => showTip(ev, nameOf(f.properties.code, f.properties.name), tipText(valueOf(f.properties.code))))
+        .on("pointerleave", () => { tip.hidden = true; })
+        .on("click", (ev, f) => select(f.properties.code));
+      // 不確定（區間包含 0 或太寬）：上面再疊一層斜線
+      g.selectAll("path.hatch").data(feats.filter((f) => valueOf(f.properties.code).status === "uncertain")).join("path")
+        .attr("class", "hatch").attr("d", path).style("fill", "url(#hatch)").style("pointer-events", "none");
+      // 選取的區描邊畫在最上層
+      const sel = feats.find((f) => f.properties.code === state.selected);
+      if (sel) g.append("path").attr("d", path(sel)).style("fill", "none").style("stroke", "var(--fg)")
+        .attr("stroke-width", 2.4).style("vector-effect", "non-scaling-stroke").style("pointer-events", "none");
+    } else {
+      g.selectAll("path.area").data(feats).join("path").attr("class", "area ward").attr("d", path).style("fill", "var(--ward)")
+        .on("pointermove", (ev, f) => showTip(ev, nameOf(f.properties.code, f.properties.name), "（行政區）"))
+        .on("pointerleave", () => { tip.hidden = true; });
+      const ids = state.view === "line" ? lineByKey[state.line].ids : dataStations;
+      const xy = (id) => proj([SL[id].lon, SL[id].lat]);
+      if (state.view === "line") {
+        g.append("path").attr("class", "route").attr("d", d3.line()(ids.map(xy)));
+      }
+      const maxTotal = d3.max(dataStations, (id) => SL[id].total) || 1;
+      const maxR = Math.max(4, Math.min(9, w / 90)); // 圓的大小跟著地圖寬度，手機上才不會擠成一團
+      const minR = Math.max(1.6, maxR * 0.3);
+      const rScale = d3.scaleSqrt([0, maxTotal], [0, maxR]);
+      const nodes = ids.map((id) => {
+        const s = SL[id];
+        const x = valueOfStation(id);
+        const [cx, cy] = xy(id);
+        return { id, s, x, cx, cy, r: s.latest ? Math.max(minR, rScale(s.total)) : minR * 0.8 };
+      }).sort((a, b) => b.r - a.r); // 大的先畫，小的才不會被蓋住
+      circles = g.append("g").selectAll("circle").data(nodes).join("circle").attr("class", "st")
+        .attr("cx", (d) => d.cx).attr("cy", (d) => d.cy)
+        .style("fill", (d) => (d.x.status === "insufficient" ? "var(--na)" : color(d.x.v)))
+        .style("fill-opacity", (d) => (d.x.status === "uncertain" ? 0.45 : 1))
+        .attr("stroke-dasharray", (d) => (d.x.status === "uncertain" ? "2 1.5" : null))
+        .on("pointermove", (ev, d) => showTip(ev, d.s.name, d.s.latest ? tipText(d.x) : "沒有對上的成交"))
+        .on("pointerleave", () => { tip.hidden = true; })
+        .on("click", (ev, d) => selectStation(d.id));
+      const sel = nodes.find((d) => d.id === state.station);
+      if (sel) {
+        const ring = g.append("circle").attr("cx", sel.cx).attr("cy", sel.cy).datum({ r: sel.r + 3 }).style("fill", "none")
+          .style("stroke", "var(--fg)").attr("stroke-width", 2.2).style("vector-effect", "non-scaling-stroke").style("pointer-events", "none");
+        circles = circles.merge(ring);
+      }
+    }
+
+    // 縮放：拖曳移動；滑鼠要按 Ctrl（觸控板的雙指縮放也是），觸控要兩指（一指留給整頁捲動）
+    const zoom = d3.zoom().scaleExtent([1, 16]).translateExtent([[0, 0], [w, h]])
+      .filter((ev) => (ev.type === "wheel" ? ev.ctrlKey || ev.metaKey : ev.type.startsWith("touch") ? ev.touches.length >= 2 : !ev.button))
+      .on("zoom", (ev) => {
+        g.attr("transform", ev.transform);
+        zoomOf[state.view] = ev.transform;
+        if (circles) circles.attr("r", (d) => d.r / ev.transform.k);
+      });
+    svg.call(zoom).on("dblclick.zoom", null);
+    const fit = (pointsXY) => {
+      const [x0, x1] = d3.extent(pointsXY, (p) => p[0]), [y0, y1] = d3.extent(pointsXY, (p) => p[1]);
+      const k = Math.max(1, Math.min(16, 0.9 / Math.max((x1 - x0) / w, (y1 - y0) / h, 1e-6)));
+      return d3.zoomIdentity.translate(w / 2 - k * (x0 + x1) / 2, h / 2 - k * (y0 + y1) / 2).scale(k);
+    };
+    const kuBounds = () => feats.filter((f) => f.properties.code <= KU_MAX).flatMap((f) => path.bounds(f));
+    const defaultT = () => {
+      if (state.view === "city") return d3.zoomIdentity;
+      if (state.view === "line") return fit(lineByKey[state.line].ids.map((id) => proj([SL[id].lon, SL[id].lat])));
+      return fit(kuBounds());
+    };
+    svg.call(zoom.transform, zoomOf[state.view] || defaultT());
+    zoomApi = {
+      in: () => svg.transition().duration(250).call(zoom.scaleBy, 1.6),
+      out: () => svg.transition().duration(250).call(zoom.scaleBy, 1 / 1.6),
+      ku: () => svg.transition().duration(400).call(zoom.transform, fit(kuBounds())),
+      all: () => svg.transition().duration(400).call(zoom.transform, d3.zoomIdentity),
+    };
     drawLegend(color);
   }
 
@@ -307,21 +461,28 @@
       d3.range(0, 1.0001, 0.1).forEach((t) => grad.append("stop").attr("offset", `${t * 100}%`).attr("stop-color", color(at(t))));
       svg.append("rect").attr("x", 4).attr("y", 2).attr("width", w - 8).attr("height", 10).attr("rx", 2).style("fill", `url(#${id})`);
       const ticks = color.kind === "seq" ? [lo, Math.sqrt(lo * hi), hi] : [lo, 0, hi];
+      const more = color.kind === "div" && stationView() ? ["以下", "", "以上"] : ["", "", ""];
       ticks.forEach((v, i) => svg.append("text").attr("x", 4 + (i / 2) * (w - 8)).attr("y", 28)
-        .attr("text-anchor", i === 0 ? "start" : i === 2 ? "end" : "middle").text(fmtValue(v)));
+        .attr("text-anchor", i === 0 ? "start" : i === 2 ? "end" : "middle").text(fmtValue(v) + more[i]));
     }
-    const key = (cls, label) => {
+    const key = (style, label, round) => {
       const k = document.createElement("span");
       k.className = "tm-key";
       const s = document.createElement("span");
-      s.className = "tm-swatch";
-      if (cls === "na") s.style.background = "var(--na)";
-      else s.style.background = "repeating-linear-gradient(45deg, var(--hatch) 0 1.5px, transparent 1.5px 5px)";
+      s.className = "tm-swatch" + (round ? " round" : "");
+      Object.assign(s.style, style);
       k.append(s, document.createTextNode(label));
       el.append(k);
     };
-    key("na", "樣本不足／沒有成交");
-    if (state.mode !== "buy") key("hatch", state.mode === "trend" ? "看不出漲跌（區間包含 0）" : "不確定（區間太寬）");
+    const hatch = { background: "repeating-linear-gradient(45deg, var(--hatch) 0 1.5px, transparent 1.5px 5px)" };
+    if (!stationView()) {
+      key({ background: "var(--na)" }, "樣本不足／沒有成交");
+      if (state.mode !== "buy") key(hatch, state.mode === "trend" ? "看不出漲跌（區間包含 0）" : "不確定（區間太寬）");
+      return;
+    }
+    key({ background: "var(--na)" }, "樣本不足", true);
+    if (state.mode !== "buy") key({ background: "var(--muted)", opacity: 0.45, borderStyle: "dashed" }, state.mode === "trend" ? "看不出漲跌" : "不確定", true);
+    el.append(Object.assign(document.createElement("span"), { textContent: `圓越大，${S.years[0]} 年以來的成交越多。拖曳移動；Ctrl＋滾輪或兩指縮放。` }));
   }
 
   // ---- 詳細面板 ----
@@ -333,7 +494,28 @@
     return e;
   }
 
+  // 大字的數字＋區間；回傳 x
+  function drawHeadline(x, modeLabel, note) {
+    const head = el("div");
+    head.append(el("div", "tm-sub", modeLabel));
+    const big = el("div", "tm-big");
+    if (x.status === "insufficient") {
+      big.textContent = "樣本不足";
+    } else {
+      big.textContent = state.mode === "buy" ? man(x.v) : pct(x.v);
+      big.append(el("small", null, state.mode === "buy" ? "萬日圓／㎡" : state.mode === "invest" ? "／年" : ""));
+      if (x.status === "uncertain") big.append(el("span", "tm-badge warn", state.mode === "trend" ? "看不出漲跌" : "不確定"));
+    }
+    head.append(big);
+    if (x.status !== "insufficient") head.append(el("div", "tm-sub", `95% 區間 ${fmtRange(x.lo, x.hi)}　筆數 ${x.n}`));
+    else head.append(el("div", "tm-sub", state.mode === "invest"
+      ? `10 年中達到 ${T.minN} 筆的年份不到 ${T.investMinYears} 年（${x.n}）`
+      : `需要每年（或${note}）至少 ${T.minN} 筆；目前 ${x.n}`));
+    panel.append(head);
+  }
+
   function drawPanel() {
+    if (stationView()) { drawStationPanel(); return; }
     const code = state.selected;
     const m = M[code];
     const feat = boundaries.features.find((f) => f.properties.code === code);
@@ -343,24 +525,8 @@
       panel.append(el("p", "tm-sub", "這裡沒有中古マンション的成交紀錄。"));
       return;
     }
-    const x = valueOf(code);
     const modeLabel = { trend: `${state.start} → ${state.end} 年漲幅`, buy: `最新 4 季（${pts[state.pc].latestPeriod}）㎡ 單價`, invest: `${data.investWindow[0]}〜${data.investWindow[1]} 年 年成長率` }[state.mode];
-    const head = el("div");
-    head.append(el("div", "tm-sub", `${modeLabel}（${pcLabel(state.pc)}）`));
-    const big = el("div", "tm-big");
-    if (x.status === "insufficient") {
-      big.textContent = "樣本不足";
-    } else {
-      big.textContent = state.mode === "buy" ? man(x.v) : state.mode === "trend" ? pct(x.v) : pct(x.v);
-      big.append(el("small", null, state.mode === "buy" ? "萬日圓／㎡" : state.mode === "invest" ? "／年" : ""));
-      if (x.status === "uncertain") big.append(el("span", "tm-badge warn", state.mode === "trend" ? "看不出漲跌" : "不確定"));
-    }
-    head.append(big);
-    if (x.status !== "insufficient") head.append(el("div", "tm-sub", `95% 區間 ${fmtRange(x.lo, x.hi)}　筆數 ${x.n}`));
-    else head.append(el("div", "tm-sub", state.mode === "invest"
-      ? `10 年中達到 ${T.minN} 筆的年份不到 ${T.investMinYears} 年（${x.n}）`
-      : `需要每年（或最新 4 季）至少 ${T.minN} 筆；目前 ${x.n}`));
-    panel.append(head);
+    drawHeadline(valueOf(code), `${modeLabel}（${pcLabel(state.pc)}）`, "最新 4 季");
     if (state.pc === "hedonic") drawHedonic(m);
     else drawOffset(m);
 
@@ -395,6 +561,68 @@
       panel.append(c2);
       drawByAge(c2, m.byAge);
     }
+    if (S) {
+      const here = dataStations.filter((id) => SL[id].city === code && SL[id].latest.status === "ok");
+      if (here.length) {
+        const b = el("button", "tm-link", `看${nameOf(code)}的 ${here.length} 個車站`);
+        b.type = "button";
+        b.addEventListener("click", () => { setView("station"); state.station = biggestIn(here); zoomOf.station = null; render(); });
+        panel.append(b);
+      }
+    }
+  }
+
+  function stationModeLabel() {
+    return {
+      trend: `${state.start} → ${state.end} 年漲幅`,
+      buy: `最近 12 季（${S.latestPeriod}）的 ㎡ 單價，換算成 ${S.target} 的水準`,
+      invest: `${S.investWindow[0]}〜${S.investWindow[1]} 年 年成長率`,
+    }[state.mode];
+  }
+
+  function drawStationPanel() {
+    const id = state.station;
+    const s = SL[id];
+    panel.replaceChildren();
+    if (!s) { panel.append(el("p", "tm-sub", "請在地圖上選一個車站。")); return; }
+    panel.append(el("h2", null, s.name));
+    panel.append(el("div", "tm-sub", s.lines.join("・")));
+    if (!s.latest) {
+      panel.append(el("p", "tm-sub", `${S.years[0]} 年以來，沒有以這站為最寄駅、對得上的中古マンション成交。`));
+      return;
+    }
+    drawHeadline(valueOfStation(id), `${stationModeLabel()}（品質調整，典型物件）`, "最近 12 季");
+
+    const x = valueOfStation(id);
+    const cx = valueFrom(sameMethodCity(s.city));
+    const cmp = el("div", "tm-cmp");
+    const cname = nameOf(s.city, s.city);
+    if (x.status !== "insufficient" && cx.status !== "insufficient") {
+      if (state.mode === "buy") {
+        cmp.append(el("b", null, `比${cname}整體 ${pct(x.v / cx.v - 1)}`), document.createTextNode(`（${cname}：${man(cx.v)} 萬／㎡，同方法、${fmtN(cx.n)} 筆）`));
+      } else {
+        cmp.append(el("b", null, `${cname}整體 ${fmtValue(cx.v)}`), document.createTextNode(`（同方法，95% 區間 ${fmtRange(cx.lo, cx.hi)}）`));
+      }
+      panel.append(cmp);
+    }
+    const cities = Object.entries(s.cities);
+    panel.append(el("p", "tm-note", cities.length > 1
+      ? `成交物件所在的區：${cities.slice(0, 3).map(([c, n]) => `${nameOf(c, c)} ${fmtN(n)} 筆`).join("、")}${cities.length > 3 ? "…" : ""}（和「${cname}整體」比）`
+      : `成交物件都在${cname}（${S.years[0]} 年以來 ${fmtN(s.total)} 筆）`));
+    if (s.pax) panel.append(el("p", "tm-note", `乘降人數：1 日約 ${fmtN(s.pax)} 人（${s.paxYear} 年，各路線合計；JR 只算上車人數，和其他公司的定義不同）`));
+
+    panel.append(el("h3", null, "每年的 ㎡ 單價（萬日圓，典型物件）"));
+    const c1 = el("div", "tm-chart");
+    panel.append(c1);
+    const series = [{ label: "這站", color: "var(--hed)", rows: s.yearly, points: true }];
+    if (S.cityYearly[s.city]) series.push({ label: cname, color: "var(--muted)", dash: "5 4", rows: S.cityYearly[s.city] });
+    drawLines(c1, series, S.years);
+    panel.append(el("p", "tm-sub", `紫線是這站、虛線是${cname}整體（同方法）。空心點：當年未滿 ${T.minN} 筆，僅供參考。`));
+    panel.append(el("p", "tm-note", `典型物件：${S.standard}。每筆成交先用品質調整模型換算成典型物件（取引、成約都換算成取引的水準），再依最寄駅分組取中位數；町名、用途地域、容積率等地點的差異保留。API 只有最寄駅、沒有到車站的距離：同一站的物件不分遠近。`));
+    const b = el("button", "tm-link", `看${cname}的區資料`);
+    b.type = "button";
+    b.addEventListener("click", () => { setView("city"); state.selected = s.city; render(); });
+    panel.append(b);
   }
 
   // 品質調整：典型物件的條件；趨勢模式時和中位數的漲幅比較（差的部分是賣出物件的組成變化）
@@ -433,7 +661,6 @@
   }
 
   function drawYearly(container, m) {
-    const w = Math.max(260, panel.clientWidth - 30), h = 170, ml = 34, mr = 74, mt = 8, mb = 22;
     const style = {
       "01": { color: "var(--accent)" }, "02": { color: "#d07a2c" },
       combined: { color: "var(--fg)", dash: "5 4" }, hedonic: { color: "var(--hed)" },
@@ -442,11 +669,21 @@
     const showCombined = state.pc === "combined" && m.offset && m.offset.status === "ok";
     const series = ["01", "02", "combined", "hedonic"]
       .filter((pc) => pts[pc] && (pc === "01" || pc === "02" || (pc === "combined" ? showCombined : state.pc === "hedonic")))
-      .map((pc) => ({ pc, label: pts[pc].label, ...style[pc], rows: m.yearly[pc] || [] }))
-      .filter((s) => s.rows.length);
+      .map((pc) => ({ label: pts[pc].label.replace("價格", ""), ...style[pc], points: pc !== "combined", rows: m.yearly[pc] || [] }));
+    drawLines(container, series);
+  }
+
+  // 每年的折線：series = [{label, color, dash, points, rows: [[年, 筆數, 中位數]]}]；points = false 不畫點（綜合的筆數有重複）
+  function drawLines(container, series, xYears) {
+    series = series.filter((s) => s.rows.length);
+    const endText = (s) => `${s.label} ${man(s.rows[s.rows.length - 1][2])}`;
+    // 右側線尾標籤的寬度（概算：全形字 11px、半形 6.5px），長的區名也不會被切掉
+    const textW = (t) => [...t].reduce((a, c) => a + (c.charCodeAt(0) > 255 ? 11 : 6.5), 0);
+    const w = Math.max(260, panel.clientWidth - 30), h = 170, ml = 34, mt = 8, mb = 22;
+    const mr = Math.max(60, d3.max(series, (s) => textW(endText(s))) + 10 || 0);
     const all = series.flatMap((s) => s.rows);
     if (!all.length) { container.append(el("p", "tm-sub", "沒有完整年的資料。")); return; }
-    const years = d3.extent(all, (r) => r[0]);
+    const years = xYears ? d3.extent(xYears) : d3.extent(all, (r) => r[0]);
     const x = d3.scaleLinear(years[0] === years[1] ? [years[0] - 1, years[1] + 1] : years, [ml, w - mr]);
     const y = d3.scaleLinear([0, d3.max(all, (r) => r[2]) * 1.1], [h - mb, mt]).nice();
     const svg = d3.select(container).append("svg").attr("viewBox", `0 0 ${w} ${h}`);
@@ -464,7 +701,7 @@
     for (const s of series) {
       svg.append("path").datum(s.rows).attr("d", line).style("fill", "none").style("stroke", s.color).attr("stroke-width", s.dash ? 1.6 : 2)
         .attr("stroke-dasharray", s.dash || null).attr("stroke-linejoin", "round").attr("stroke-linecap", "round");
-      if (s.dash) continue; // 綜合不畫點：每年的筆數是兩邊相加，可能有重複
+      if (!s.points) continue;
       svg.append("g").selectAll("circle").data(s.rows).join("circle").attr("cx", (r) => x(r[0])).attr("cy", (r) => y(r[2])).attr("r", 2.6)
         .style("fill", (r) => (r[1] >= T.minN ? s.color : "var(--panel)")).style("stroke", s.color).attr("stroke-width", 1.2)
         .append("title").text((r) => `${r[0]} 年 ${s.label}：${man(r[2])} 萬（${fmtN(r[1])} 筆）`);
@@ -472,7 +709,7 @@
     // 線尾標籤放在右側；兩條線的終點太近時上下錯開，避免重疊
     const ends = series.map((s) => {
       const last = s.rows[s.rows.length - 1];
-      return { s, x: x(last[0]), y: y(last[2]), text: `${s.label.replace("價格", "")} ${man(last[2])}` };
+      return { s, y: y(last[2]), text: endText(s) };
     }).sort((a, b) => a.y - b.y);
     for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 13) ends[i].y = ends[i - 1].y + 13;
     for (const e of ends) svg.append("text").attr("x", w - mr + 6).attr("y", e.y).attr("dy", "0.32em")
@@ -491,33 +728,95 @@
     g.append("text").attr("x", (r) => x(r[2]) + 6).attr("y", bh / 2).attr("dy", "0.32em").text((r) => `${man(r[2])} 萬（${fmtN(r[1])} 筆）`);
   }
 
+  // ---- 路線圖：依路線上的順序，各站的值與 95% 區間 ----
+  function drawLineChart(color) {
+    const card = document.getElementById("line-card");
+    card.hidden = state.view !== "line";
+    if (card.hidden) return;
+    const ln = lineByKey[state.line];
+    document.getElementById("line-title").textContent = `${ln.label}：各站的${stationModeLabel()}`;
+    const box = document.getElementById("line-chart");
+    box.replaceChildren();
+    const nodes = ln.ids.map((id) => ({ id, s: SL[id], x: valueOfStation(id) }));
+    const ok = nodes.filter((d) => d.x.status !== "insufficient");
+    const step = 24, ml = 46, mr = 12, mt = 26, mb = 92, ph = 190;
+    const w = Math.max(box.clientWidth || 600, ml + mr + step * nodes.length);
+    const h = mt + ph + mb;
+    const x = d3.scalePoint(nodes.map((d) => d.id), [ml, w - mr]).padding(0.5);
+    const lo = d3.min(ok, (d) => d.x.lo), hi = d3.max(ok, (d) => d.x.hi);
+    const y = (state.mode === "buy" ? d3.scaleLinear([0, (hi || 1) * 1.05], [mt + ph, mt]) : d3.scaleLinear([Math.min(0, lo || 0), Math.max(0, hi || 0.01)], [mt + ph, mt])).nice();
+    const svg = d3.select(box).append("svg").attr("width", w).attr("height", h).attr("viewBox", `0 0 ${w} ${h}`)
+      .attr("role", "img").attr("aria-label", `${ln.label}的路線圖`);
+    // 所在區的色帶：連續幾站在同一區就畫成一段，上面寫區名
+    const bands = [];
+    for (const d of nodes) {
+      const c = d.s.city || (bands.length ? bands[bands.length - 1].city : null);
+      if (bands.length && bands[bands.length - 1].city === c) bands[bands.length - 1].ids.push(d.id);
+      else bands.push({ city: c, ids: [d.id] });
+    }
+    const half = x.step() / 2;
+    bands.forEach((b, i) => {
+      const x0 = x(b.ids[0]) - half, x1 = x(b.ids[b.ids.length - 1]) + half;
+      if (i % 2 === 0) svg.append("rect").attr("x", x0).attr("y", mt - 18).attr("width", x1 - x0).attr("height", ph + 18).style("fill", "var(--bg)");
+      if (b.city && x1 - x0 > 30) svg.append("text").attr("x", (x0 + x1) / 2).attr("y", mt - 6).attr("text-anchor", "middle")
+        .text(nameOf(b.city, "")).style("font-size", "10px");
+    });
+    svg.append("g").selectAll("line").data(y.ticks(4)).join("line").attr("x1", ml).attr("x2", w - mr)
+      .attr("y1", (v) => y(v)).attr("y2", (v) => y(v)).style("stroke", "var(--line)").style("stroke-dasharray", (v) => (v === 0 && state.mode !== "buy" ? null : "2 3"));
+    svg.append("g").selectAll("text").data(y.ticks(4)).join("text").attr("x", ml - 6).attr("y", (v) => y(v)).attr("dy", "0.32em")
+      .attr("text-anchor", "end").text((v) => (state.mode === "buy" ? v / 10000 : pct(v).replace(".0%", "%")));
+    const pt = svg.append("g").selectAll("g").data(ok).join("g").attr("class", "pt").on("click", (ev, d) => selectStation(d.id));
+    pt.append("line").attr("x1", (d) => x(d.id)).attr("x2", (d) => x(d.id)).attr("y1", (d) => y(d.x.lo)).attr("y2", (d) => y(d.x.hi))
+      .style("stroke", "var(--muted)").attr("stroke-width", 1.4);
+    pt.append("circle").attr("cx", (d) => x(d.id)).attr("cy", (d) => y(d.x.v)).attr("r", (d) => (d.id === state.station ? 6 : 4.5))
+      .style("fill", (d) => (d.x.status === "uncertain" ? "var(--panel)" : color(d.x.v))).style("stroke", (d) => (d.id === state.station ? "var(--fg)" : color(d.x.v)))
+      .attr("stroke-width", (d) => (d.id === state.station ? 2 : 1.4));
+    pt.append("title").text((d) => `${d.s.name}：${fmtValue(d.x.v)}（${fmtRange(d.x.lo, d.x.hi)}，${d.x.n} 筆）`);
+    svg.append("g").selectAll("text").data(nodes).join("text")
+      .attr("class", (d) => "name" + (d.x.status === "insufficient" ? " dim" : "") + (d.id === state.station ? " sel" : ""))
+      .attr("transform", (d) => `translate(${x(d.id) + 4},${mt + ph + 10}) rotate(-60)`).attr("text-anchor", "end").text((d) => d.s.name)
+      .on("click", (ev, d) => { if (d.s.latest) selectStation(d.id); });
+    document.getElementById("line-note").textContent =
+      `點代表各站的值，直線是 95% 區間；灰色站名：沒有成交或筆數不足（${T.minN} 筆）。色帶是車站所在的區。站的順序是依位置推算的，不是官方資料；` +
+      `國土數值情報的山手線只有品川〜新宿〜田端一側，東京・上野一側算在東海道線、東北線。`;
+  }
+
   // ---- 排行 ----
   function drawRank(color) {
     const body = document.getElementById("rank-body");
     body.replaceChildren();
+    const label = stationView() ? "品質調整，典型物件" : pcLabel(state.pc);
+    const where = state.view === "line" ? `${lineLabel()} 各站（依路線順序）` : stationView() ? "車站 " : "";
     document.getElementById("rank-title").textContent = {
-      trend: `${state.start} → ${state.end} 年 漲幅排行（${pts[state.pc].label}）`,
-      buy: `最新 4 季 ㎡ 單價排行（${pcLabel(state.pc)}，萬日圓／㎡）`,
-      invest: `${data.investWindow[0]}〜${data.investWindow[1]} 年 年成長率排行（${pts[state.pc].label}）`,
+      trend: `${where}${state.start} → ${state.end} 年 漲幅${state.view === "line" ? "" : "排行"}（${label}）`,
+      buy: `${where}${stationView() ? "最近 12 季" : "最新 4 季"} ㎡ 單價${state.view === "line" ? "" : "排行"}（${label}，萬日圓／㎡）`,
+      invest: `${where}${(stationView() ? S.investWindow : data.investWindow).join("〜")} 年 年成長率${state.view === "line" ? "" : "排行"}（${label}）`,
     }[state.mode];
+    document.getElementById("rank-name").textContent = stationView() ? "車站" : "市區町村";
     document.getElementById("rank-col").textContent = { trend: "漲幅", buy: "中位數", invest: "年成長率" }[state.mode];
-    const rows = Object.keys(M).map((code) => ({ code, ...valueOf(code) }));
-    const ok = rows.filter((r) => r.status !== "insufficient").sort((a, b) => b.v - a.v);
-    const na = rows.filter((r) => r.status === "insufficient").sort((a, b) => a.code.localeCompare(b.code));
-    [...ok, ...na].forEach((r, i) => {
+    const rows = items();
+    const ordered = state.view === "line" ? rows : [
+      ...rows.filter((r) => r.status !== "insufficient").sort((a, b) => b.v - a.v),
+      ...rows.filter((r) => r.status === "insufficient").sort((a, b) => a.key.localeCompare(b.key)),
+    ];
+    const selectedKey = stationView() ? state.station : state.selected;
+    ordered.forEach((r, i) => {
       const tr = el("tr");
-      if (r.code === state.selected) tr.classList.add("selected");
+      if (r.key === selectedKey) tr.classList.add("selected");
       if (r.status !== "ok") tr.classList.add("dim");
-      tr.append(el("td", null, r.status === "insufficient" ? "" : String(i + 1)));
+      tr.append(el("td", null, state.view === "line" ? String(i + 1) : r.status === "insufficient" ? "" : String(i + 1)));
       const td = el("td");
       const dot = el("span", "tm-dot");
       dot.style.background = r.status === "insufficient" ? "var(--na)" : color(r.v);
-      const btn = el("button", null, nameOf(r.code, r.code));
+      if (stationView()) dot.style.borderRadius = "50%";
+      const s = SL[r.key];
+      const btn = el("button", null, stationView() ? s.name : nameOf(r.key, r.key));
       btn.type = "button";
-      btn.addEventListener("click", () => select(r.code, true));
+      btn.addEventListener("click", () => (stationView() ? (s.latest && selectStation(r.key, true)) : select(r.key, true)));
       td.append(dot, btn);
+      if (stationView() && s.city) td.append(el("small", null, nameOf(s.city, "")));
       tr.append(td);
-      if (r.status === "insufficient") tr.append(el("td", null, "樣本不足"), el("td", null, ""), el("td", null, String(r.n)));
+      if (r.status === "insufficient") tr.append(el("td", null, stationView() && !s.latest ? "沒有成交" : "樣本不足"), el("td", null, ""), el("td", null, String(r.n)));
       else tr.append(
         el("td", null, fmtValue(r.v) + (r.status === "uncertain" ? "？" : "")),
         el("td", null, fmtRange(r.lo, r.hi)),
@@ -528,8 +827,9 @@
   }
 
   // ---- 控制項 ----
+  const yearsNow = () => (stationView() ? S.years : pts[state.pc].completeYears);
   function fillYears() {
-    const ys = pts[state.pc].completeYears;
+    const ys = yearsNow();
     if (!ys.includes(state.start) || !ys.includes(state.end) || state.start >= state.end) {
       state.end = ys[ys.length - 1];
       state.start = ys[Math.max(0, ys.length - 11)];
@@ -543,8 +843,24 @@
     document.getElementById("year-end").querySelectorAll("option").forEach((o) => { o.disabled = +o.value <= state.start; });
   }
 
+  function fillLines() {
+    const sel = document.getElementById("line-select");
+    if (sel.options.length) { sel.value = state.line; return; }
+    // 只有一條路線的公司併成「其他」，選單才不會太長
+    const groups = d3.groups(S.lines, (l) => l.group);
+    const other = groups.filter(([, ls]) => ls.length === 1).flatMap(([, ls]) => ls);
+    for (const [name, ls] of [...groups.filter(([, ls]) => ls.length > 1), ...(other.length ? [["其他", other]] : [])]) {
+      const og = document.createElement("optgroup");
+      og.label = name;
+      for (const l of ls) og.append(new Option(l.label, l.key));
+      sel.append(og);
+    }
+    sel.value = state.line;
+  }
+
   function syncControls() {
     if (state.mode === "invest" && !data.investPriceTypes.includes(state.pc)) state.pc = data.investPriceTypes[0];
+    document.querySelectorAll("[data-view]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === state.view)));
     document.querySelectorAll("[data-mode]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === state.mode)));
     document.querySelectorAll("[data-pc]").forEach((b) => {
       b.setAttribute("aria-pressed", String(b.dataset.pc === state.pc));
@@ -552,9 +868,21 @@
       b.disabled = !hasData || (state.mode === "invest" && !data.investPriceTypes.includes(b.dataset.pc));
       b.hidden = !pts[b.dataset.pc];
     });
+    document.getElementById("pc-field").hidden = stationView();
+    document.getElementById("line-field").hidden = state.view !== "line";
+    document.getElementById("zoom").hidden = !stationView();
+    if (state.view === "line") fillLines();
     document.getElementById("years-field").hidden = state.mode !== "trend";
     if (state.mode === "trend") fillYears();
     const e = document.getElementById("tm-explain");
+    if (stationView()) {
+      e.textContent = {
+        trend: `${state.start} 年到 ${state.end} 年，各車站典型物件價格漲了多少。紅色越深漲越多；半透明是 95% 區間包含 0，看不出漲跌。`,
+        buy: `最近 12 季（${S.latestPeriod}）的成交換算成 ${S.target} 的水準後，各車站典型物件的 ㎡ 單價中位數（只看 4 季的話大部分車站筆數不夠）。顏色越深越貴。`,
+        invest: `${S.investWindow[0]}〜${S.investWindow[1]} 年，各車站典型物件價格每年平均成長多少。只是把過去的走勢延伸來看，不是預測；半透明是區間太寬、不確定。`,
+      }[state.mode] + `車站一律用品質調整：每筆成交先換算成典型物件（取引、成約都換算成取引水準），再依「最寄駅」分組。${state.view === "line" ? "點圓或路線圖上的站名看細節。" : "點圓看細節。"}`;
+      return;
+    }
     e.textContent = {
       trend: `${state.start} 年到 ${state.end} 年，年度 ㎡ 單價中位數漲了多少。紅色越深漲越多、藍色是下跌；斜線表示 95% 區間包含 0，看不出漲跌。`,
       buy: `最新 4 季（${pts[state.pc].latestPeriod}）的 ㎡ 單價中位數。顏色越深越貴。`,
@@ -565,47 +893,82 @@
     }[state.pc] || "");
   }
 
-  function render() {
-    syncControls();
+  function redraw() {
     drawMap();
     drawPanel();
-    drawRank(colorScale());
+    const color = colorScale();
+    drawLineChart(color);
+    drawRank(color);
+  }
+
+  function render() {
+    syncControls();
+    redraw();
   }
 
   function select(code, scroll) {
     state.selected = code;
-    drawMap();
-    drawPanel();
-    drawRank(colorScale());
+    redraw();
     if (scroll && window.matchMedia("(max-width: 860px)").matches) panel.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  function selectStation(id, scroll) {
+    state.station = id;
+    redraw();
+    if (scroll && window.matchMedia("(max-width: 860px)").matches) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function setLine(key) {
+    state.line = key;
+    zoomOf.line = null;
+    const ids = lineByKey[key].ids;
+    if (!ids.includes(state.station)) state.station = biggestIn(ids);
+    render();
+  }
+
+  document.querySelectorAll("[data-view]").forEach((b) => b.addEventListener("click", () => { setView(b.dataset.view); render(); }));
   document.querySelectorAll("[data-mode]").forEach((b) => b.addEventListener("click", () => { state.mode = b.dataset.mode; render(); }));
   document.querySelectorAll("[data-pc]").forEach((b) => b.addEventListener("click", () => { if (!b.disabled) { state.pc = b.dataset.pc; render(); } }));
   document.getElementById("year-start").addEventListener("change", (e) => { state.start = +e.target.value; render(); });
   document.getElementById("year-end").addEventListener("change", (e) => { state.end = +e.target.value; render(); });
+  document.getElementById("line-select").addEventListener("change", (e) => setLine(e.target.value));
+  for (const k of ["in", "out", "ku", "all"]) document.getElementById(`zoom-${k}`).addEventListener("click", () => zoomApi && zoomApi[k]());
 
   // ---- 固定文字 ----
   const totalLatest = d3.sum(Object.values(M), (m) => (m.latest["01"] ? m.latest["01"].n : 0));
   document.getElementById("tm-source").textContent =
-    `國土交通省 不動産取引価格情報（取引價格 ${years01[0]}〜${years01[years01.length - 1]} 年、成約價格 ${pts["02"] ? pts["02"].completeYears[0] : "—"} 年起）・中古マンション等・${Object.keys(M).length} 個市區町村・最新 4 季取引 ${fmtN(totalLatest)} 筆・資料產生日 ${data.generated}`;
+    `國土交通省 不動産取引価格情報（取引價格 ${years01[0]}〜${years01[years01.length - 1]} 年、成約價格 ${pts["02"] ? pts["02"].completeYears[0] : "—"} 年起）・中古マンション等・${Object.keys(M).length} 個市區町村` +
+    (S ? `・${fmtN(dataStations.length)} 個車站` : "") + `・最新 4 季取引 ${fmtN(totalLatest)} 筆・資料產生日 ${data.generated}`;
   document.getElementById("note-thresholds").textContent =
     `一年（或最新 4 季）少於 ${T.minN} 筆的區不上色（30 筆時中位數本身約有 ±13% 的誤差）。趨勢模式的漲幅 95% 區間包含 0、投資模式 ${T.investWindowYears} 年中達標年份少於 ${T.investMinYears} 年或區間寬度超過 ${(T.investMaxCiWidth * 100).toFixed(0)} 個百分點時，加上斜線。伊豆・小笠原的離島沒有畫出來。`;
   document.getElementById("note-advice").textContent = data.text.notAdvice;
   const noteHed = document.getElementById("note-hedonic");
   if (data.hedonic) {
     const H = data.hedonic;
-    noteHed.textContent = `用迴歸把 ㎡ 單價拆成町名、面積、屋齡、舊耐震、房型、構造、改裝、用途地域、容積率、取引／成約，以及「各區各年」的效果（${fmtN(H.n)} 筆成交，R² ${H.r2}；極端值 ${fmtN(H.outliers)} 筆、調停・競売等與関係者間取引不用）。「各區各年」的效果就是指數：典型物件是 ${H.standard}，地段依該區所有成交的分布平均，所以不同年份比的是同一種物件。誤差以町名為單位計算（同一町名的成交彼此相關）。限制：API 沒有車站距離和樓層，同一町名內的差異抓不到；各特性的效果全東京、全期間共用；「屋齡 17 年」的物件在不同年份是不同年代蓋的，新一代建物本身品質較好的部分也會算進漲幅；同一筆成交可能同時在取引和成約裡。`;
+    noteHed.textContent = `用迴歸把 ㎡ 單價拆成町名、面積、屋齡、舊耐震、房型、構造、改裝、用途地域、容積率、取引／成約，以及「各區各年」的效果（${fmtN(H.n)} 筆成交，R² ${H.r2}；極端值 ${fmtN(H.outliers)} 筆、調停・競売等與関係者間取引不用）。「各區各年」的效果就是指數：典型物件是 ${H.standard}，地段依該區所有成交的分布平均，所以不同年份比的是同一種物件。誤差以町名為單位計算（同一町名的成交彼此相關）。面積的效果隨年份變動（2021 年起大坪數相對變貴），所以指數是 55㎡ 的漲幅，不受各區賣出物件的坪數組成影響。限制：API 沒有車站距離和樓層，同一町名內的差異抓不到；面積以外的特性效果全東京、全期間共用；「屋齡 17 年」的物件在不同年份是不同年代蓋的，新一代建物本身品質較好的部分也會算進漲幅；同一筆成交可能同時在取引和成約裡。`;
   } else {
     noteHed.parentElement.hidden = true;
   }
+  if (S) {
+    document.getElementById("note-station").textContent =
+      `成交點版本的 API（XPT001）把每筆成交放在「最寄駅」的位置，用它對回成交資料，${S.years[0]} 年以來對上 ${fmtN(S.n)} 筆。每筆先用品質調整模型換算成典型物件（${S.standard}，取引水準），扣掉面積、屋齡、房型等建物的差異，保留町名、用途地域、容積率等地點的差異，再依最寄駅分組取中位數。` +
+      `購買模式用最近 12 季、以時點修正換算成 ${S.target} 的水準；趨勢、投資模式用每年的中位數，門檻和區一樣是 ${T.minN} 筆。「所在區」是成交最多的區，比較用的區價格也用同樣的方法算（和行政區地圖上的品質調整指數不完全相同）。` +
+      `限制：API 沒有到車站的距離，同一站的物件不分遠近；新開的車站可能還沒收錄；乘降人數各公司定義不同（JR 只算上車）；路線上的車站順序是依位置推算的。區間只算抽樣誤差。`;
+  } else {
+    document.getElementById("note-station-wrap").hidden = true;
+    document.getElementById("view-field").hidden = true;
+  }
   document.getElementById("note-disclaimer").textContent = data.text.disclaimer;
-  document.getElementById("note-credit").textContent = `邊界資料：${data.text.boundaryCredit}`;
+  document.getElementById("note-credit").textContent = `邊界資料：${data.text.boundaryCredit}` + (S ? `。車站資料：${data.text.stationCredit}` : "");
 
   render();
   let lastW = mapEl.clientWidth;
   new ResizeObserver(() => {
-    if (Math.abs(mapEl.clientWidth - lastW) > 4) { lastW = mapEl.clientWidth; drawMap(); drawPanel(); }
+    if (Math.abs(mapEl.clientWidth - lastW) > 4) {
+      lastW = mapEl.clientWidth;
+      for (const k of Object.keys(zoomOf)) zoomOf[k] = null; // 縮放是以像素記的，寬度變了就回到預設範圍
+      redraw();
+    }
   }).observe(mapEl);
 })();
 </script>

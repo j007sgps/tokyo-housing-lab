@@ -1,4 +1,4 @@
-"""讀取層：國交省 XIT001（不動産取引価格情報）API client。
+"""讀取層：國交省「不動産情報ライブラリ」API client（XIT001 取引価格；圖磚型的 XPT001、XKT015 也共用）。
 
 - 請求之間至少間隔 min_interval 秒
 - 429 / 5xx / 連線錯誤：退避重試（有 Retry-After 就照它的秒數）
@@ -28,7 +28,8 @@ from tokyo_housing_lab.sources.raw_store import RawStore
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://www.reinfolib.mlit.go.jp/ex-api/external/XIT001"
+API_ROOT = "https://www.reinfolib.mlit.go.jp/ex-api/external/"
+BASE_URL = API_ROOT + "XIT001"
 KEY_HEADER = "Ocp-Apim-Subscription-Key"
 DEFAULT_BACKOFF_SECONDS = (2.0, 4.0, 8.0, 16.0)
 # 最新幾季官方可能還會補資料，所以「有資料的最新 N 季」每次都重抓。N 是估計值，官方沒有公布修正期間
@@ -128,11 +129,16 @@ class ReinfolibClient:
             query.api_param: query.region,
             "priceClassification": query.price_classification,
         }
+        status, body = self.get(self._base_url, params, query.label)
+        return FetchResult(query, status, body)
+
+    def get(self, url: str, params: dict[str, str], label: str) -> tuple[int, bytes | None]:
+        """打一次 API（含節流、重試）。回傳 (狀態碼, JSON 原文)；404 = 沒有資料 → (404, None)。"""
         # 第 0 次是正式請求，之後每一次重試前先等 backoff_seconds[i]
         for attempt in range(len(self._backoff_seconds) + 1):
             self._throttle.wait()
             try:
-                response = self._http.get(self._base_url, params=params)
+                response = self._http.get(url, params=params)
             except httpx.TransportError as exc:
                 status = None
                 reason = f"連線錯誤（{type(exc).__name__}）"
@@ -140,31 +146,31 @@ class ReinfolibClient:
             else:
                 status = response.status_code
                 if status == 200:
-                    return self._ok(query, response)
+                    return 200, self._ok(label, response)
                 if status == 404:
-                    logger.info("%s -> 404，該期沒有資料", query.label)
-                    return FetchResult(query, 404, None)
+                    logger.info("%s -> 404，該期沒有資料", label)
+                    return 404, None
                 if status != 429 and status < 500:
-                    raise ReinfolibAPIError(f"{query.label}：HTTP {status}（不重試）", status)
+                    raise ReinfolibAPIError(f"{label}：HTTP {status}（不重試）", status)
                 reason = f"HTTP {status}"
                 retry_after = _retry_after_seconds(response)
 
             if attempt == len(self._backoff_seconds):
-                raise ReinfolibAPIError(f"{query.label}：重試 {attempt} 次仍失敗，最後一次是 {reason}", status)
+                raise ReinfolibAPIError(f"{label}：重試 {attempt} 次仍失敗，最後一次是 {reason}", status)
             wait = retry_after if retry_after is not None else self._backoff_seconds[attempt]
-            logger.warning("%s -> %s，%.0f 秒後重試（第 %d 次）", query.label, reason, wait, attempt + 1)
+            logger.warning("%s -> %s，%.0f 秒後重試（第 %d 次）", label, reason, wait, attempt + 1)
             self._sleep(wait)
         raise AssertionError("unreachable")
 
-    def _ok(self, query: QuarterQuery, response: httpx.Response) -> FetchResult:
+    def _ok(self, label: str, response: httpx.Response) -> bytes:
         # response.content 已經由 httpx 依 Content-Encoding: gzip 解壓好了
         body = response.content
         try:
             json.loads(body)
         except ValueError as exc:
-            raise ReinfolibAPIError(f"{query.label}：HTTP 200 但內容不是 JSON", 200) from exc
-        logger.info("%s -> 200（%d bytes）", query.label, len(body))
-        return FetchResult(query, 200, body)
+            raise ReinfolibAPIError(f"{label}：HTTP 200 但內容不是 JSON", 200) from exc
+        logger.info("%s -> 200（%d bytes）", label, len(body))
+        return body
 
 
 FetchOutcome = Literal["saved", "no_data", "skipped"]

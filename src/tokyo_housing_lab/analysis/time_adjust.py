@@ -33,6 +33,7 @@ class TimeAdjustmentResult:
                 "factor_high": a.high,
                 "basis": a.basis,
                 "n": a.n,
+                "area_elasticity": a.area_elasticity,
             }
             for a in self.adjustments
         ]

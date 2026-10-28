@@ -1,14 +1,15 @@
 -- 每季的 ㎡ 單價中位數，以及「時點修正後」的中位數（換算成 time_adjustment.target 期間的水準）
---   修正後 = 單價 × 該區該季的係數（tokyo-housing-lab adjust 算的）；係數是 NULL 的成交不算進修正後的中位數
+--   修正後 = 單價 × 該區該季的係數 × (面積 / 55㎡)^面積彈性（tokyo-housing-lab adjust 算的）
+--   係數是 NULL 的成交（或面積不明）不算進修正後的中位數
 --   修正得好的話，修正後的中位數大致是平的（但仍會受每季賣出物件的組成影響）
 SELECT
     t.year,
     t.quarter,
     t.price_classification,
     median(t.unit_price_per_m2) AS median_unit_price,
-    median(t.unit_price_per_m2 * a.factor) AS median_adjusted,
+    median(t.unit_price_per_m2 * a.factor * power(t.area_m2 / 55, a.area_elasticity)) AS median_adjusted,
     count(*) AS n,
-    count(a.factor) AS n_adjusted,
+    count(a.factor * t.area_m2) AS n_adjusted,
     any_value(a.target) AS target,
     any_value(a.basis) AS basis
 FROM transactions t

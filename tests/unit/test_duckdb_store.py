@@ -240,7 +240,8 @@ def test_replace_time_adjustments(store):
     def row(year, factor):
         return {"region": "13", "city": "13101", "year": year, "quarter": 1, "target": "2025Q2〜2026Q1",
                 "factor": factor, "factor_low": None if factor is None else factor * 0.9,
-                "factor_high": None if factor is None else factor * 1.1, "basis": None if factor is None else "city", "n": 40}
+                "factor_high": None if factor is None else factor * 1.1, "basis": None if factor is None else "city", "n": 40,
+                "area_elasticity": 0.0 if factor is None else 0.1}
 
     assert store.replace_time_adjustments([row(2020, 1.5), row(2021, 1.3)], datetime(2026, 1, 1)) == 2
     # 整張表換掉：上一次的列不留下

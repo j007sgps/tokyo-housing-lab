@@ -2,7 +2,7 @@
 
 中位數會受「那年賣了什麼物件」影響（新舊、大小、地段）。這裡用 OLS 把這些因素拆開：
 
-    ln(㎡ 單價) = 町名 + 市區町村×期間 + 面積 + 屋齡 + 舊耐震 + 房型 + 構造 + 改裝 + 用途地域 + 容積率
+    ln(㎡ 單價) = 町名 + 市區町村×期間 + 面積 + 面積×期間 + 屋齡 + 舊耐震 + 房型 + 構造 + 改裝 + 用途地域 + 容積率
                   + 成約×市區町村 + 成約×期間 + 誤差
 
 - 「市區町村×期間」就是指數本身（每區以第一個期間為基準 = 0，避免和町名共線）
@@ -72,6 +72,10 @@ class Spec:
     old_seismic_last_year: int = 1981  # 建築年 ≤ 這年 → 舊耐震
     standard_area: float = 55  # 典型物件：東京的中位數條件
     standard_age: float = 17
+    # 面積的效果隨期間變動：加上 ln(面積 / standard_area) × 期間（全東京共用，第一個期間為基準）。
+    # 實測 2016→2025 小坪數（<30㎡）和大坪數（≥70㎡）的相對價格變了約 15%，全期共用的面積係數會讓
+    # 小坪數多的地方（車站）前期高估、後期低估。以典型物件的面積為中心，典型物件的水準不受影響
+    area_by_period: bool = True
 
     def standard_label(self) -> str:
         return f"{self.standard_area:g}㎡・屋齡 {self.standard_age:g} 年・RC・2LDK・未改裝"
@@ -208,6 +212,7 @@ class Design:
     pooled_cities: set[str]  # 町名全部併成一個的區（町名和期間分不開時）
     subperiod: np.ndarray | None  # 期間內第幾季（有給才有「季內」欄位）
     subperiod_base: dict[int, int]  # 各期間的基準季：該期有資料的第一季
+    area_base_period: int | None = None  # 面積 × 期間的基準期間（spec.area_by_period 才有）
 
 
 @dataclass
@@ -276,9 +281,11 @@ def design_matrix(
         base_period = {c: int(f) for c, f in zip(cities.tolist(), first.tolist(), strict=True) if f != np.iinfo(np.int64).max}
         sp_periods = period[seiyaku & usable]
         seiyaku_base = int(sp_periods.min()) if len(sp_periods) else None
+        area_base = int(period[usable].min()) if spec.area_by_period and usable.any() else None
     else:
         big, base_period = template.big_districts, template.base_period
         seiyaku_cities, seiyaku_base = template.seiyaku_cities, template.seiyaku_base_period
+        area_base = template.area_base_period
         usable = ~seiyaku | np.isin(cities, list(seiyaku_cities))[city_inv]
     def district_codes(pooled: set[str]) -> tuple[list[str], np.ndarray]:
         """町名 → 整數編號（小町名併進該區的「其他」）；後面都用編號，不對 40 萬個字串排序。"""
@@ -329,6 +336,9 @@ def design_matrix(
     blocks.append(_categorical("容積率", sample.floor_area_ratio.astype(float), far_group))
     blocks.append(_Block([f"成約:{c}" for c in cities.tolist()], np.where(seiyaku, city_inv, -1)))
     blocks.append(_Block(sp_names, np.where(seiyaku, p_inv, -1)))
+    if spec.area_by_period:
+        area_names = [None if p == area_base else f"面積×時間:{p}" for p in up.tolist()]
+        blocks.append(_Block(area_names, p_inv, np.log(sample.area.astype(float) / spec.standard_area)))
     sub_base: dict[int, int] = {}
     if subperiod is not None:
         subperiod = np.asarray(subperiod, dtype=int)
@@ -391,7 +401,7 @@ def design_matrix(
     design = Design(
         X, names, index, clusters, city[keep], period[keep], seiyaku[keep],
         base_period, seiyaku_base, seiyaku_cities, big, absorbed, pooled,
-        None if subperiod is None else subperiod[keep], sub_base,
+        None if subperiod is None else subperiod[keep], sub_base, area_base,
     )  # fmt: skip
     return design, keep
 
@@ -467,6 +477,7 @@ class Model:
     fit: Fit
     sample: Sample  # 去掉離群值後實際用到的樣本
     outliers: int
+    inlier_range: tuple[float, float] = (-math.inf, math.inf)  # 第一次估計的殘差在這個範圍內才不算離群值
 
     def coef(self, name: str) -> tuple[float, float]:
         """(係數, 標準誤)；基準類別 → (0, 0)。"""
@@ -481,7 +492,9 @@ def fit_hedonic(
     sample, period = sample.subset(keep), period[keep]
     subperiod = None if subperiod is None else subperiod[keep]
     fit = fit_ols(design.X, sample.log_price, design.clusters, design.names)
-    inlier = np.abs(fit.resid - np.median(fit.resid)) <= OUTLIER_SIGMAS * fit.sigma
+    center = float(np.median(fit.resid))
+    inlier_range = (center - OUTLIER_SIGMAS * fit.sigma, center + OUTLIER_SIGMAS * fit.sigma)
+    inlier = (fit.resid >= inlier_range[0]) & (fit.resid <= inlier_range[1])
     outliers = int((~inlier).sum())
     if outliers:
         sample, period = sample.subset(inlier), period[inlier]
@@ -489,7 +502,7 @@ def fit_hedonic(
         design, keep = design_matrix(sample, period, spec, subperiod=subperiod)
         sample = sample.subset(keep)
         fit = fit_ols(design.X, sample.log_price, design.clusters, design.names)
-    return Model(spec, design, fit, sample, outliers)
+    return Model(spec, design, fit, sample, outliers, inlier_range)
 
 
 def predict(
@@ -498,6 +511,33 @@ def predict(
     """回傳 (預測的 ln 單價, 能預測的列)。"""
     design, keep = design_matrix(sample, period, model.spec, template=model.design, subperiod=subperiod)
     return design.X @ model.fit.beta, keep
+
+
+# 標準化時保留的欄位：地點、時間（其餘是建物特性和成約，換成典型物件的）
+_KEPT_PREFIXES = LOCATION_PREFIXES + ("時間:", "季內:")
+
+
+def standardize(
+    model: Model, sample: Sample, period: np.ndarray, subperiod: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """每筆成交換算成典型物件、取引水準的 ln 單價：實際 − 建物特性與成約的效果 ＋ 典型物件的效果。
+
+    地點（町名、用途地域、容積率）、時間和殘差都保留，所以同一站的成交還是有高有低。
+    回傳 (標準化的 ln 單價, 能算的列)；不能算的列是 nan：模型沒見過的類別或期間，以及離群值（和估計時同一個範圍）。
+    """
+    design, keep = design_matrix(sample, period, model.spec, template=model.design, subperiod=subperiod)
+    beta = model.fit.beta
+    y = sample.log_price[keep]
+    resid = y - design.X @ beta
+    inlier = (resid >= model.inlier_range[0]) & (resid <= model.inlier_range[1])
+    removed = np.array([not nm.startswith(_KEPT_PREFIXES) for nm in design.names])
+    std = y - design.X[:, removed] @ beta[removed] + float(standard_vector(model) @ beta)
+    rows = np.nonzero(keep)[0][inlier]
+    out = np.full(len(sample), np.nan)
+    out[rows] = std[inlier]
+    ok = np.zeros(len(sample), dtype=bool)
+    ok[rows] = True
+    return out, ok
 
 
 # ---- 指數 ----
@@ -606,6 +646,8 @@ class Adjustment:
     se: float | None
     basis: Literal["city", "tokyo"] | None  # city = 用該區自己的指數；tokyo = 樣本不足，用全東京的
     n: int  # 該區在那一期（4 季）的筆數
+    # 係數是典型物件（55㎡）的；面積 A 的物件再乘 (A / 55)^area_elasticity（面積的效果隨期間變動，全東京共用）
+    area_elasticity: float = 0.0
 
     @property
     def factor(self) -> float | None:
@@ -618,6 +660,11 @@ class Adjustment:
     @property
     def high(self) -> float | None:
         return None if self.log_factor is None else math.exp(self.log_factor + Z95 * self.se)
+
+    def log_factor_for(self, area: float, standard_area: float = Spec.standard_area) -> float | None:
+        if self.log_factor is None:
+            return None
+        return self.log_factor + self.area_elasticity * math.log(area / standard_area)
 
 
 def time_adjustments(
@@ -634,6 +681,8 @@ def time_adjustments(
     該區在那一期或目標期不到 MIN_N 筆（或模型裡沒有這區）→ 用全東京的係數：各區的係數依目標期筆數加權平均。
     這時不知道這區自己的走勢，區間另外加上「各區係數圍繞全東京平均的離散」（當成隨機抽一區），
     不然只反映全東京平均本身的誤差，會窄得不合理。
+    係數是典型物件（55㎡）的；有面積 × 期間項時另外給 area_elasticity = 目標期 − 那一期的面積斜率
+    （區間只算 55㎡ 的部分）。
     """
     d, beta, cov = model.design, model.fit.beta, model.fit.cov
     if d.subperiod is None:
@@ -656,6 +705,11 @@ def time_adjustments(
         if f"時間:{c}:{w}" in d.index:
             return unit(f"時間:{c}:{w}")
         return np.zeros(size) if d.base_period.get(c) == w else None
+
+    def area_slope(w: int) -> float:
+        """面積 × 期間的係數（基準期間、或模型沒有這一項 → 0）。"""
+        i = d.index.get(f"面積×時間:{w}")
+        return 0.0 if i is None else float(beta[i])
 
     target_q = [v for k in range(4) if (v := quarter_vec(0, k)) is not None]
     target_q_mean = np.mean(target_q, axis=0)
@@ -703,7 +757,7 @@ def time_adjustments(
                 continue
             diff = diff + target_q_mean - qv
             se = math.sqrt(max(0.0, _quad(diff, diff, cov)) + extra)
-            out.append(Adjustment(c, y, q, float(diff @ beta), se, basis, n))
+            out.append(Adjustment(c, y, q, float(diff @ beta), se, basis, n, area_slope(0) - area_slope(w)))
     return out
 
 

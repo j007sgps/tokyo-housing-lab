@@ -22,6 +22,7 @@ from tokyo_housing_lab.analysis.hedonic import (
     index_series,
     predict,
     renovation_group,
+    standardize,
     structure_group,
     time_adjustments,
     validate_holdout,
@@ -228,6 +229,51 @@ def test_outliers_are_removed_and_reported():
     assert m.coef("舊耐震")[0] == pytest.approx(TRUE["old_seismic"], abs=0.03)
 
 
+def test_standardize_keeps_location_and_time_only(exact_model):
+    # 每筆換成典型物件、取引水準：剩下 町名 + 時間 + 用途地域 + 容積率 + 典型物件的特性
+    s, m = exact_model
+    std, ok = standardize(m, s, yearly_period(s))
+    assert ok.all()
+    for i in range(0, len(s), 7):
+        expect = TRUE["district"][s.district[i]] + TRUE["time"][s.city[i]][s.year[i]]
+        expect += TRUE["city_planning"][s.city_planning[i]] + true_far(s.floor_area_ratio[i]) + true_building(55, 17)
+        assert std[i] == pytest.approx(expect, abs=1e-9)
+
+
+def test_standardize_drops_outliers_with_fit_range():
+    s = make_sample(np.random.default_rng(3), noise=0.05)
+    s.log_price[5] += 3.0
+    m = fit_hedonic(s, yearly_period(s))
+    std, ok = standardize(m, s, yearly_period(s))
+    assert not ok[5] and np.isnan(std[5])
+    assert int((~ok).sum()) == m.outliers  # 和估計時去掉的是同一批
+
+
+AREA_DRIFT = {2010: 0.0, 2011: 0.05, 2012: 0.10, 2013: 0.20}  # ln(面積/55) 的斜率每年多多少
+
+
+def test_area_by_period_recovers_drift_and_keeps_standard_index(exact_model):
+    s = make_sample(np.random.default_rng(1))
+    s.log_price = s.log_price + np.array([AREA_DRIFT[y] for y in s.year]) * np.log(s.area / 55)
+    m = fit_hedonic(s, yearly_period(s), Spec(area_by_period=True))
+    assert m.fit.r2 == pytest.approx(1.0)
+    assert "面積×時間:2010" not in m.design.index  # 第一個期間是基準
+    for y in (2011, 2012, 2013):
+        assert m.coef(f"面積×時間:{y}")[0] == pytest.approx(AREA_DRIFT[y], abs=1e-9)
+    # 以 55㎡ 為中心：典型物件的指數和沒有漂移的資料一樣
+    want, got = index_series(exact_model[1]), index_series(m)
+    for city in CITIES:
+        for y in YEARS:
+            assert got[city].levels[y] == pytest.approx(want[city].levels[y], abs=1e-9)
+    # 標準化也扣掉各年的面積效果：和沒有漂移的資料（同一個亂數種子，只差價格）一樣
+    base_sample, base_model = exact_model
+    std, _ = standardize(m, s, yearly_period(s))
+    assert std == pytest.approx(standardize(base_model, base_sample, yearly_period(base_sample))[0], abs=1e-9)
+    # 沒有這一項：面積的效果只能取平均，殘差留著
+    pooled = fit_hedonic(s, yearly_period(s), Spec(area_by_period=False))
+    assert pooled.fit.r2 < 0.999
+
+
 def test_cluster_robust_cov_matches_hand_computation():
     rng = np.random.default_rng(4)
     X = rng.normal(size=(12, 3))
@@ -399,7 +445,8 @@ def b_true(w, k):
     return 0.01 * k * (w + 4)
 
 
-def make_quarterly(rng, noise=0.01, per_quarter=40, small=5):
+def make_quarterly(rng, noise=0.01, per_quarter=40, small=5, area_drift=None):
+    """area_drift：期間 → ln(面積/55) 的斜率（面積的效果隨期間變動）。"""
     cols = {k: [] for k in ("city", "district", "year", "quarter", "price_classification", "log_price", "area",
                              "building_year", "floor_plan", "structure", "renovation", "city_planning", "floor_area_ratio")}
     plan = {"13101": ["甲町", "乙町", "丙町"], "13102": ["丁町", "戊町", "己町"], SMALL_CITY: ["氷川"]}
@@ -417,6 +464,7 @@ def make_quarterly(rng, noise=0.01, per_quarter=40, small=5):
                     y = TRUE["district"].get(d, 12.0) + trend[city][w] + b_true(w, k) + true_building(area, age)
                     y += TRUE["old_seismic"] if year - age <= 1981 else 0.0
                     y += rng.normal(0, noise)
+                    y += area_drift[w] * math.log(area / 55) if area_drift else 0.0
                     row = (city, d, year, q, "01", y, area, year - age, "2LDK", "RC", "未改装", "商業地域", 200.0)
                     for key, v in zip(cols, row, strict=True):
                         cols[key].append(v)
@@ -461,6 +509,25 @@ def test_time_adjustment_recovers_city_trend_and_quarters(quarterly_model):
             assert a.low < a.factor < a.high
     # 目標期內 4 季的係數平均 = 1（log 平均 = 0）
     assert sum(adj[("13101", 2013, q)].log_factor for q in (1, 2, 3, 4)) == pytest.approx(0, abs=1e-9)
+
+
+def test_time_adjustment_area_elasticity():
+    drift = {-3: -0.1, -2: 0.0, -1: 0.05, 0: 0.2}  # 小坪數相對越來越便宜
+    s = make_quarterly(np.random.default_rng(12), area_drift=drift)
+    m = fit_hedonic(s, window_period(s, 2013, 4), Spec(area_by_period=True), subperiod=window_subperiod(s, 2013, 4))
+    adj = {(a.city, a.year, a.quarter): a for a in time_adjustments(m, ["13101", SMALL_CITY], ALL_QUARTERS, 2013, 4)}
+    for (city, y, q), a in adj.items():
+        w = y - 2013
+        assert a.area_elasticity == pytest.approx(drift[0] - drift[w], abs=0.01)
+        # 55㎡ 的係數不受漂移影響；25㎡ 的再加上 彈性 × ln(25/55)
+        if city == "13101":
+            assert a.log_factor == pytest.approx(true_log_factor(city, w, q - 1), abs=0.01)
+            want = true_log_factor(city, w, q - 1) + (drift[0] - drift[w]) * math.log(25 / 55)
+            assert a.log_factor_for(25) == pytest.approx(want, abs=0.015)
+        assert a.log_factor_for(55) == a.log_factor
+    # 沒有面積 × 期間項：彈性 = 0
+    plain = fit_hedonic(s, window_period(s, 2013, 4), Spec(area_by_period=False), subperiod=window_subperiod(s, 2013, 4))
+    assert all(a.area_elasticity == 0.0 for a in time_adjustments(plain, ["13101"], ALL_QUARTERS, 2013, 4))
 
 
 def test_small_or_unknown_city_uses_tokyo(quarterly_model):

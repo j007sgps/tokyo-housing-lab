@@ -8,7 +8,8 @@ import pytest
 from test_municipalities import build_synthetic_db
 from tokyo_housing_lab import DISCLAIMER
 from tokyo_housing_lab.analysis.municipalities import COMBINED, build_analysis
-from tokyo_housing_lab.map.build import BOUNDARY_CREDIT, NOT_ADVICE, build_map_data, render_html
+from tokyo_housing_lab.map import build
+from tokyo_housing_lab.map.build import BOUNDARY_CREDIT, NOT_ADVICE, STATION_CREDIT, build_map_data, render_html
 from tokyo_housing_lab.storage.duckdb_store import DuckDBStore
 
 GENERATED = date(2026, 10, 28)
@@ -56,7 +57,10 @@ def test_map_data_structure(analysis):
     assert d["priceTypes"]["01"]["latestPeriod"] == "2006Q2〜2007Q1"
     assert d["priceTypes"]["02"]["completeYears"] == []
     assert d["thresholds"]["minN"] == 30
-    assert d["text"] == {"disclaimer": DISCLAIMER, "boundaryCredit": BOUNDARY_CREDIT, "notAdvice": NOT_ADVICE}
+    assert d["text"] == {
+        "disclaimer": DISCLAIMER, "boundaryCredit": BOUNDARY_CREDIT, "stationCredit": STATION_CREDIT, "notAdvice": NOT_ADVICE,
+    }  # fmt: skip
+    assert d["stations"] is None  # 沒給車站分析
     chuo = d["municipalities"]["13102"]
     assert chuo["name"] == "中央区"
     assert chuo["latest"]["01"]["status"] == "ok" and chuo["latest"]["01"]["n"] == 161
@@ -183,3 +187,52 @@ def test_map_without_hedonic(analysis):
     d = build_map_data(analysis, GENERATED)
     assert "hedonic" not in d["priceTypes"] and d["hedonic"] is None
     assert d["investPriceTypes"] == ["combined", "01"]
+
+
+# --- 車站 ---
+
+
+@pytest.fixture(scope="module")
+def station_analyses(tmp_path_factory):
+    from test_station_analysis import build_station_db
+
+    from tokyo_housing_lab.analysis.stations import build_station_analysis
+
+    with DuckDBStore(build_station_db(tmp_path_factory.mktemp("st") / "st.duckdb")) as s:
+        return build_analysis(s), build_station_analysis(s)
+
+
+def test_station_map_data(station_analyses):
+    a, sa = station_analyses
+    st = build_map_data(a, GENERATED, sa)["stations"]
+    assert st["years"] == list(range(2016, 2026)) and st["investWindow"] == [2016, 2025]
+    assert st["latestPeriod"] == "2023Q2〜2026Q1" and st["target"] == "2025Q2〜2026Q1"
+    assert st["lines"] == []  # 路線上有成交的車站不到 LINE_MIN_STATIONS 站：不放進選單
+    assert set(st["list"]) == {"A", "B"}  # 只放有成交的車站
+    s = st["list"]["A"]
+    assert s["name"] == "西新宿" and s["lines"] == ["東京メトロ丸ノ内線"] and s["pax"] == 100000
+    assert s["city"] == "13104" and s["total"] == 410 and s["cities"] == {"13104": 410}
+    g = sa.growth("A", 2016, 2025)
+    assert s["growth"]["2016-2025"] == [round(g.total, 4), round(g.ci_low, 4), round(g.ci_high, 4), int(g.status == "uncertain")]
+    assert s["latest"]["median"] == round(sa.stations["A"].latest.median) and s["invest"]["status"] == "ok"
+    assert [r[0] for r in s["yearly"]] == st["years"]
+    # 所在區的比較：同方法
+    assert st["cityLatest"]["13104"]["n"] == 360 and "2016-2025" in st["cityGrowth"]["13104"]
+    assert st["cityInvest"]["13104"]["status"] == "ok" and len(st["cityYearly"]["13104"]) == 10
+
+
+def test_station_lines_in_map_data(station_analyses, monkeypatch):
+    a, sa = station_analyses
+    monkeypatch.setattr(build, "LINE_MIN_STATIONS", 1)
+    st = build_map_data(a, GENERATED, sa)["stations"]
+    assert st["lines"] == [{"key": "JR東日本／中央線", "label": "JR東日本中央線", "group": "JR東日本", "ids": ["C", "B"]}]
+    # 路線上沒有成交的車站：只有名稱和位置（路線圖、地圖上的路線要用）
+    assert st["list"]["C"] == {"name": "新宿", "lines": ["JR東日本中央線"], "lon": 139.7, "lat": 35.69, "pax": 3000000, "paxYear": 2023}
+
+
+def test_render_html_with_stations(station_analyses):
+    a, sa = station_analyses
+    p = payload_of(render_html(a, GENERATED, stations=sa))
+    assert set(p["data"]["stations"]["list"]) == {"A", "B"}
+    assert "駅別乗降客数" in p["data"]["text"]["stationCredit"]
+    assert payload_of(render_html(a, GENERATED))["data"]["stations"] is None

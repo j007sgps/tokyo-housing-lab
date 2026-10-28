@@ -95,8 +95,66 @@ TIME_ADJUSTMENT_COLUMNS = [
     ("factor_high", "DOUBLE"),
     ("basis", "VARCHAR"),  # city = 該區自己的指數；tokyo = 樣本不足，用全東京的
     ("n", "INTEGER"),  # 該區在那一期（4 季）的筆數
+    ("area_elasticity", "DOUBLE"),  # factor 是 55㎡ 的；面積 A 的物件再乘 (A / 55)^area_elasticity
     ("computed_at", "TIMESTAMP"),
 ]
+
+
+# 車站（load 時從 data/raw/tiles/ 建）：XKT015 的月台依 S12_001g 合併成一站
+STATION_COLUMNS = [
+    ("station_id", "VARCHAR"),  # S12_001g；對不到車站的成交點是 "pt:經度,緯度"
+    ("name", "VARCHAR"),
+    ("lines", "VARCHAR[]"),  # 「營運公司／路線」
+    ("lon", "DOUBLE"),
+    ("lat", "DOUBLE"),
+    ("passengers", "BIGINT"),  # 最近一年各路線的乘降人數合計
+    ("passengers_year", "INTEGER"),
+]
+STATION_LINE_COLUMNS = [
+    ("operator", "VARCHAR"),
+    ("line", "VARCHAR"),
+    ("station_id", "VARCHAR"),
+    ("seq", "INTEGER"),  # 路線上的順序（從位置推算，不是官方資料）
+]
+# XPT001 的成交點（東京都內）：成交的鍵 ＋ 最寄駅
+STATION_POINT_COLUMNS = [
+    ("year", "INTEGER"),
+    ("quarter", "INTEGER"),
+    ("price_classification", "VARCHAR"),
+    ("city", "VARCHAR"),
+    ("district_code", "VARCHAR"),
+    ("trade_price", "BIGINT"),
+    ("area", "DOUBLE"),
+    ("building_year", "INTEGER"),
+    ("floor_plan", "VARCHAR"),
+    ("structure", "VARCHAR"),
+    ("station_id", "VARCHAR"),
+]
+
+
+# 成交點 → XIT001 的成交（INSERT 時跳過已經對上的）。keys 的欄位名是 station_point 的
+_MATCH_SQL = """
+    INSERT INTO transaction_station
+    SELECT t.raw_file, t.row_index, k.station_id
+    FROM transactions t
+    JOIN (
+        SELECT {keys}, any_value(station_id) AS station_id
+        FROM station_point
+        WHERE trade_price IS NOT NULL AND area IS NOT NULL
+        GROUP BY {keys}
+        HAVING count(DISTINCT station_id) = 1
+    ) k ON {on}
+    WHERE NOT EXISTS (
+        SELECT 1 FROM transaction_station s WHERE s.raw_file = t.raw_file AND s.row_index = t.row_index
+    )
+"""
+# station_point 的欄位 → transactions 的欄位（同名的不用列）
+_TRANSACTION_KEY = {
+    "area": "t.area_m2",
+    "building_year": "CASE WHEN t.building_year_status = 'ok' THEN t.building_year END",
+    "floor_plan": "coalesce(t.floor_plan, '')",
+    "structure": "coalesce(t.structure, '')",
+}
 
 
 class QuarterlyMedian(NamedTuple):
@@ -123,6 +181,14 @@ class DuckDBStore:
         self._create("transactions", TRANSACTION_COLUMNS, ',\n  PRIMARY KEY ("raw_file", "row_index")')
         self._create("fetch_log", _FETCH_LOG_COLUMNS)
         self._create("time_adjustment", TIME_ADJUSTMENT_COLUMNS, ',\n  PRIMARY KEY ("city", "year", "quarter")')
+        self._create("station", STATION_COLUMNS, ',\n  PRIMARY KEY ("station_id")')
+        self._create("station_line", STATION_LINE_COLUMNS)
+        self._create("station_point", STATION_POINT_COLUMNS)
+        self._create(
+            "transaction_station",
+            [("raw_file", "VARCHAR"), ("row_index", "INTEGER"), ("station_id", "VARCHAR")],
+            ',\n  PRIMARY KEY ("raw_file", "row_index")',
+        )
 
     def _create(self, table: str, columns: list[tuple[str, str]], extra: str = "") -> None:
         """表格不存在就建立；欄位和程式不一致（舊版本建的）就砍掉重建。
@@ -236,6 +302,63 @@ class DuckDBStore:
             self.con.rollback()
             raise
         return len(values)
+
+    def replace_stations(
+        self,
+        stations: Iterable[Mapping[str, Any]],
+        lines: Iterable[Mapping[str, Any]],
+        points: Iterable[Mapping[str, Any]],
+    ) -> int:
+        """車站、路線、成交點整批換掉，再重建「成交 → 車站」的對應。回傳對上的成交筆數。
+
+        對應方式：XPT001 的成交點和 XIT001 的成交，兩段比對——
+        1. (年, 季, 價格種類, 町丁目, 總價, 面積, 建築年, 房型, 構造)
+        2. 第 1 段對不上的，用 (年, 季, 價格種類, 町丁目, 總價, 面積)
+        同一個鍵有好幾筆、而且最寄駅不同時不對（分不出哪筆是哪筆）；最寄駅相同就沒差。
+        只用第 2 段的鍵時，同季同町丁目同價同面積、最寄駅不同的物件（相鄰車站之間的大樓）有 2% 對不上。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            self.con.begin()
+            try:
+                for table, columns, rows in (
+                    ("station", STATION_COLUMNS, stations),
+                    ("station_line", STATION_LINE_COLUMNS, lines),
+                    ("station_point", STATION_POINT_COLUMNS, points),
+                ):
+                    self.con.execute(f"DELETE FROM {table}")
+                    self._insert_ndjson(table, columns, rows, Path(tmp) / f"{table}.ndjson")
+                self.con.execute("DELETE FROM transaction_station")
+                base = ["year", "quarter", "price_classification", "district_code", "trade_price", "area"]
+                for keys in (base + ["building_year", "floor_plan", "structure"], base):
+                    self.con.execute(_MATCH_SQL.format(
+                        keys=", ".join(keys),
+                        on=" AND ".join(f"{_TRANSACTION_KEY.get(k, 't.' + k)} IS NOT DISTINCT FROM k.{k}" for k in keys),
+                    ))  # fmt: skip
+                matched = self.con.execute("SELECT count(*) FROM transaction_station").fetchone()[0]
+                self.con.commit()
+            except BaseException:
+                self.con.rollback()
+                raise
+        return matched
+
+    def _insert_ndjson(
+        self, table: str, columns: list[tuple[str, str]], rows: Iterable[Mapping[str, Any]], path: Path
+    ) -> None:
+        # executemany 太慢（每秒約 300 筆），成交點有幾十萬筆：寫成 NDJSON 再 read_json 一次插入
+        names = [n for n, _ in columns]
+        count = 0
+        with path.open("w", encoding="utf-8") as out:
+            for row in rows:
+                out.write(json.dumps({n: row[n] for n in names}, ensure_ascii=False) + "\n")
+                count += 1
+        if count:
+            types = "{" + ", ".join(f"'{n}': '{t}'" for n, t in columns) + "}"
+            cols = ", ".join(f'"{n}"' for n in names)
+            self.con.execute(
+                f"INSERT INTO {table} ({cols}) SELECT {cols} FROM "
+                f"read_json(?, format = 'newline_delimited', columns = {types})",
+                [str(path)],
+            )
 
     def query(self, name: str, **params: Any) -> list[dict[str, Any]]:
         """執行 queries/<name>.sql，每一列回傳成 {欄位名: 值}。"""

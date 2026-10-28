@@ -1,6 +1,7 @@
 """命令列入口。
 
   fetch：打 API，原始檔存到 data/raw/（預設東京都全域 2005Q3〜；已存在的跳過，最新 4 季重抓）
+  fetch-stations：圖磚型 API（成交的最寄駅、車站資料），原始檔存到 data/raw/tiles/
   load ：只讀 data/raw/，清理後寫進 DuckDB（不打 API）
   query：每季 ㎡ 單價中位數與筆數（只讀 DuckDB）
   analyze：各市區町村的排行（購買／趨勢／投資模式，只讀 DuckDB）
@@ -23,10 +24,11 @@ import numpy as np
 from tokyo_housing_lab import DISCLAIMER
 from tokyo_housing_lab.analysis import hedonic as hd
 from tokyo_housing_lab.analysis.municipalities import COMBINED, HEDONIC, INVEST_PRICE_CLASSIFICATION, build_analysis
+from tokyo_housing_lab.analysis.stations import StationAnalysis, build_station_analysis, line_label
 from tokyo_housing_lab.analysis.time_adjust import basis_counts, compute_time_adjustments
 from tokyo_housing_lab.analysis.trend import MIN_N
 from tokyo_housing_lab.config import MissingApiKeyError, load_api_key
-from tokyo_housing_lab.pipeline import DEFAULT_DB_PATH, DEFAULT_RAW_DIR, load_raw_dir
+from tokyo_housing_lab.pipeline import DEFAULT_DB_PATH, DEFAULT_RAW_DIR, load_raw_dir, load_station_tiles
 from tokyo_housing_lab.sources.raw_store import RawStore
 from tokyo_housing_lab.sources.reinfolib_api import (
     REFRESH_RECENT_QUARTERS,
@@ -35,6 +37,7 @@ from tokyo_housing_lab.sources.reinfolib_api import (
     fetch_range,
 )
 from tokyo_housing_lab.sources.reinfolib_records import RawFileError
+from tokyo_housing_lab.sources.reinfolib_tiles import fetch_station_tiles
 from tokyo_housing_lab.storage.duckdb_store import DuckDBStore
 
 TACHIKAWA = "13202"
@@ -48,9 +51,16 @@ def _quarter(text: str) -> tuple[int, int]:
     return int(m.group(1)), int(m.group(2))
 
 
-def _make_client() -> ReinfolibClient:
+def _make_client(timeout: float = 30.0) -> ReinfolibClient:
     # 測試時換成 MockTransport 版本
-    return ReinfolibClient(load_api_key())
+    return ReinfolibClient(load_api_key(), timeout=timeout)
+
+
+def _fetch_stations(args: argparse.Namespace) -> None:
+    # z = 11 的圖磚一年約 20MB，回應可能要 20 秒以上
+    with _make_client(timeout=180.0) as client:
+        counts = fetch_station_tiles(client, args.raw_dir, args.start, date.today(), force=args.force)
+    print(f"抓取完成：新存檔 {counts['saved']}、無資料(404) {counts['no_data']}、已有跳過 {counts['skipped']}")
 
 
 def _fetch(args: argparse.Namespace) -> None:
@@ -77,6 +87,14 @@ def _load(args: argparse.Namespace) -> None:
     )
     if summary.skipped_files:
         print(f"跳過 {len(summary.skipped_files)} 個原始檔（內容已包含在東京都全域的檔案裡）")
+    with DuckDBStore(args.db) as store:
+        stations = load_station_tiles(args.raw_dir, store)
+    if stations:
+        rate = stations.matched / stations.candidates if stations.candidates else 0
+        print(
+            f"車站：{stations.tiles} 個圖磚檔 → 車站 {stations.stations} 站（另有名稱不明 {stations.unknown_stations} 處）、"
+            f"成交點 {stations.points} 筆 → 對上成交 {stations.matched} 筆（同期間的 {rate:.1%}）"
+        )
 
 
 PRICE_LABELS = {"01": "取引", "02": "成約"}
@@ -111,7 +129,7 @@ def _query_adjusted(args: argparse.Namespace) -> None:
     if rows and target is None:
         raise ValueError("還沒有時點修正係數，請先執行 adjust")
     print(f"市區町村 {args.city}　中古マンション等　㎡ 單價中位數（日圓／㎡）")
-    print(f"修正後 = 每筆成交 × 該季的時點修正係數，換算成 {target} 的平均水準")
+    print(f"修正後 = 每筆成交 × 該季的時點修正係數 ×（面積／55㎡）^面積彈性，換算成 {target} 的平均水準")
     print(f"{'期間':<8}{'種類':<4}{'中位數':>12}{'修正後':>12}{'筆數':>6}")
     for r in rows:
         median = f"{r['median_unit_price']:,.0f}"
@@ -146,7 +164,7 @@ def _adjust(args: argparse.Namespace) -> None:
     ly = result.last[0]
     cols = [(ly - 10, 1), (ly - 5, 1), (ly - 1, 1)]
     by_key = {(a.city, a.year, a.quarter): a for a in result.adjustments}
-    print("成交價 × 係數 ≈ 現在的水準（＊ = 樣本不足，用全東京的係數）")
+    print("55㎡ 的成交價 × 係數 ≈ 現在的水準（＊ = 樣本不足，用全東京的係數）")
     print(f"  {'市區町村':<10}" + "".join(f"{y}Q{q:>1}".rjust(11) for y, q in cols))
     for city in sorted({a.city for a in result.adjustments}):
         cells = []
@@ -154,6 +172,15 @@ def _adjust(args: argparse.Namespace) -> None:
             a = by_key.get((city, y, q))
             cells.append("—" if a is None or a.factor is None else f"×{a.factor:.2f}{'＊' if a.basis == 'tokyo' else ''}")
         print(f"  {names.get(city, city):<10}" + "".join(c.rjust(11) for c in cells))
+    # 面積彈性全東京共用：每季一個數字，舉 25㎡、80㎡ 的例子
+    sample = next((by_key[(c, *yq)] for yq in cols for c in sorted({a.city for a in result.adjustments})
+                   if (c, *yq) in by_key and by_key[(c, *yq)].factor is not None), None)  # fmt: skip
+    if sample and sample.area_elasticity:
+        e = sample.area_elasticity
+        print(
+            f"面積不是 55㎡ 的再乘（面積／55）^面積彈性（每季一個值，全東京共用）。例：{sample.year}Q{sample.quarter} 的彈性 {e:+.2f}"
+            f" → 25㎡ 再 ×{(25 / 55) ** e:.2f}、80㎡ 再 ×{(80 / 55) ** e:.2f}"
+        )
     print()
     print(NOT_ADVICE)
     print(DISCLAIMER)
@@ -170,10 +197,89 @@ def _pct(x: float) -> str:
     return f"{x * 100:+.1f}%"
 
 
+def _find_line(sa: StationAnalysis, text: str) -> str:
+    """--line：顯示名稱（JR中央線）或正式名稱（東日本旅客鉄道／中央線）完全相同的優先，否則部分相符要只有一條。"""
+    exact = [k for k in sa.lines if text in (k, line_label(k))]
+    found = exact or [k for k in sa.lines if text in k or text in line_label(k)]
+    if len(found) == 1:
+        return found[0]
+    if not found:
+        raise ValueError(f"找不到路線「{text}」")
+    raise ValueError(f"「{text}」符合好幾條路線，請說清楚：{'、'.join(sorted(line_label(k) for k in found))}")
+
+
+def _analyze_stations(args: argparse.Namespace) -> None:
+    if args.price is not None:
+        raise ValueError("車站一律用品質調整（典型物件），不能指定 --price")
+    with DuckDBStore(args.db) as store:
+        sa = build_station_analysis(store, args.region)
+        names = {r["city"]: r["name"] for r in store.query("municipality_names", region=args.region)}
+    line = _find_line(sa, args.line) if args.line else None
+    ids = sa.lines[line] if line else [sid for sid, r in sa.stations.items() if r.cities]
+    label = f"品質調整（典型物件 {sa.standard}，取引水準）"
+    where = f"{line_label(line)} 各站（依路線上的順序）" if line else "各車站"
+
+    def row(sid: str, value: str, detail: str) -> str:
+        r = sa.stations[sid]
+        return f"  {r.info.name:<10}{names.get(r.city, '') if r.city else '':<8}{value}  （{detail}）"
+
+    rows: list[tuple[str, float | None, str]] = []  # (代號, 排序用的值, 輸出)
+    if args.mode == "buy":
+        y1, q1, y2, q2 = sa.latest_period
+        print(f"購買模式：{label}，{where}，{y1}Q{q1}〜{y2}Q{q2} 換算成 {sa.target} 水準的 ㎡ 單價中位數（萬日圓／㎡）")
+        for sid in ids:
+            p = sa.stations[sid].latest
+            ok = p.status == "ok"
+            rows.append((sid, p.median if ok else None, row(sid, f"{_man(p.median):>7}", f"95% {_man(p.ci_low)}〜{_man(p.ci_high)}，{p.n} 筆") if ok else ""))
+    elif args.mode == "trend":
+        start = args.start or sa.years[0]
+        end = args.end or sa.years[-1]
+        for y in (start, end):
+            if y not in sa.years:
+                raise ValueError(f"車站沒有 {y} 年的完整資料（可選：{sa.years[0]}〜{sa.years[-1]}）")
+        print(f"趨勢模式：{label}，{where}，{start} → {end} 年的漲幅")
+        for sid in ids:
+            g = sa.growth(sid, start, end)
+            mark = "  ？區間包含 0，看不出漲跌" if g.status == "uncertain" else ""
+            ok = g.status != "insufficient"
+            rows.append((sid, g.total if ok else None,
+                         row(sid, f"{_pct(g.total):>8}", f"每年 {_pct(g.annual)}，95% {_pct(g.ci_low)}〜{_pct(g.ci_high)}") + mark if ok else ""))  # fmt: skip
+    else:
+        print(f"投資模式：{label}，{where}，{sa.years[-1] - 9}〜{sa.years[-1]} 年的長期趨勢（年成長率）")
+        for sid in ids:
+            t = sa.stations[sid].invest
+            ok = t is not None and t.status != "insufficient"
+            mark = "  ？區間太寬，不確定" if ok and t.status == "uncertain" else ""
+            rows.append((sid, t.annual if ok else None,
+                         row(sid, f"{_pct(t.annual):>7}/年", f"95% {_pct(t.ci_low)}〜{_pct(t.ci_high)}，{t.years_used} 年") + mark if ok else ""))  # fmt: skip
+    if not line:
+        rows.sort(key=lambda r: -(r[1] if r[1] is not None else -math.inf))
+    insufficient = []
+    for sid, v, text in rows:
+        if v is None:
+            if line:
+                print(f"  {sa.stations[sid].info.name:<10}{'':<8}樣本不足")
+            else:
+                insufficient.append(sa.stations[sid].info.name)
+        else:
+            print(text)
+    if insufficient:
+        print(f"  樣本不足（未滿 {MIN_N} 筆）：{len(insufficient)} 站")
+    print("※ 依「最寄駅」分組，沒有到車站的距離；路線上的順序是依位置推算的。")
+    print()
+    print(NOT_ADVICE)
+    print(DISCLAIMER)
+
+
 def _analyze(args: argparse.Namespace) -> None:
     if not args.db.is_file():
         raise FileNotFoundError(f"找不到資料庫 {args.db}，請先執行 load")
-    pc = args.price
+    if args.by == "station":
+        _analyze_stations(args)
+        return
+    if args.line:
+        raise ValueError("--line 只能和 --by station 一起用")
+    pc = args.price or "01"
     with DuckDBStore(args.db) as store:
         a = build_analysis(store, args.region, with_hedonic=pc == HEDONIC)  # 品質調整要估模型（十幾秒），用到才估
     if pc == HEDONIC and a.hedonic is None:
@@ -292,10 +398,16 @@ def _map(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"找不到資料庫 {args.db}，請先執行 load")
     with DuckDBStore(args.db) as store:
         a = build_analysis(store, args.region)
-    html = render_html(a, date.today(), standalone=not args.fragment)
+        try:
+            stations = build_station_analysis(store, args.region)
+        except ValueError as e:  # 沒有車站資料：只畫行政區
+            print(f"（不畫車站：{e}）")
+            stations = None
+    html = render_html(a, date.today(), standalone=not args.fragment, stations=stations)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(html, encoding="utf-8")
-    print(f"地圖已產生：{args.out}（{len(html.encode()) // 1024} KB，{len(a.municipalities)} 個市區町村）。用瀏覽器打開即可。")
+    n_st = "" if stations is None else f"、{sum(1 for r in stations.stations.values() if r.cities)} 個車站"
+    print(f"地圖已產生：{args.out}（{len(html.encode()) // 1024} KB，{len(a.municipalities)} 個市區町村{n_st}）。用瀏覽器打開即可。")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -319,6 +431,14 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
     fetch.set_defaults(handler=_fetch)
 
+    fst = sub.add_parser(
+        "fetch-stations", help="成交的最寄駅（XPT001）與車站資料（XKT015）→ data/raw/tiles/", epilog=DISCLAIMER
+    )
+    fst.add_argument("--start", type=int, default=2016, help="成交點從哪一年開始（預設 2016）")
+    fst.add_argument("--force", action="store_true", help="已有原始檔的也全部重抓（預設只重抓今年和去年）")
+    fst.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
+    fst.set_defaults(handler=_fetch_stations)
+
     load = sub.add_parser("load", help="data/raw/ → 清理 → DuckDB（不打 API）", epilog=DISCLAIMER)
     load.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
     load.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
@@ -335,10 +455,14 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument(
         "--price",
         choices=["01", "02", COMBINED, HEDONIC],
-        default="01",
+        default=None,
         help="01＝取引價格（預設）、02＝成約價格、combined＝綜合（取引＋換算成取引水準的成約）、"
-        "hedonic＝品質調整（典型物件的價格，要估模型，十幾秒）",
+        "hedonic＝品質調整（典型物件的價格，要估模型，十幾秒）。--by station 時不能指定（一律品質調整）",
     )
+    analyze.add_argument(
+        "--by", choices=["city", "station"], default="city", help="city＝市區町村（預設）、station＝車站（要先 fetch-stations、load）"
+    )
+    analyze.add_argument("--line", help="--by station 時只看一條路線，依站的順序（例：JR中央線、大江戸線）")
     analyze.add_argument("--from", dest="start", type=int, help="趨勢模式的起年（預設：最新完整年的 10 年前）")
     analyze.add_argument("--to", dest="end", type=int, help="趨勢模式的迄年（預設：最新的完整年）")
     analyze.add_argument("--region", default=TOKYO)
