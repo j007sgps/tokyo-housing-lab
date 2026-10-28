@@ -9,8 +9,9 @@
 import json
 from collections.abc import Iterable, Mapping
 from datetime import datetime
+from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import duckdb
 
@@ -75,6 +76,15 @@ _FETCH_LOG_COLUMNS = [
     ("result", "VARCHAR"),
     ("file", "VARCHAR"),
 ]
+
+
+class QuarterlyMedian(NamedTuple):
+    year: int
+    quarter: int
+    price_classification: str
+    median_unit_price: float | None
+    n: int
+    n_excluded: int  # 單價算不出來（面積是代碼、空值…）而沒算進中位數的筆數
 
 
 def _ddl(table: str, columns: list[tuple[str, str]], extra: str = "") -> str:
@@ -160,3 +170,8 @@ class DuckDBStore:
             self.con.rollback()
             raise
         return len(entries)
+
+    def quarterly_median(self, city: str) -> list[QuarterlyMedian]:
+        """M1 完成條件的查詢（SQL 在 queries/quarterly_median.sql）。"""
+        sql = files("tokyo_housing_lab.queries").joinpath("quarterly_median.sql").read_text(encoding="utf-8")
+        return [QuarterlyMedian(*row) for row in self.con.execute(sql, {"city": city}).fetchall()]

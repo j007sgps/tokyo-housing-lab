@@ -2,6 +2,7 @@
 
   fetch：打 API，原始檔存到 data/raw/（已存在的跳過，最新 4 季重抓）
   load ：只讀 data/raw/，清理後寫進 DuckDB（不打 API）
+  query：每季 ㎡ 單價中位數與筆數（只讀 DuckDB）
 """
 
 import argparse
@@ -64,6 +65,28 @@ def _load(args: argparse.Namespace) -> None:
     )
 
 
+PRICE_LABELS = {"01": "取引", "02": "成約"}
+
+
+def _query(args: argparse.Namespace) -> None:
+    if not args.db.is_file():
+        raise FileNotFoundError(f"找不到資料庫 {args.db}，請先執行 load")
+    with DuckDBStore(args.db) as store:
+        rows = store.quarterly_median(args.city)
+    print(f"市區町村 {args.city}　中古マンション等　㎡ 單價中位數（日圓／㎡）")
+    print(f"{'期間':<8}{'種類':<4}{'中位數':>12}{'筆數':>6}{'無法計算':>8}")
+    for r in rows:
+        median = f"{r.median_unit_price:,.0f}" if r.median_unit_price is not None else "-"
+        print(
+            f"{r.year}Q{r.quarter:<3}{PRICE_LABELS.get(r.price_classification, r.price_classification):<4}"
+            f"{median:>14}{r.n:>8}{r.n_excluded:>10}"
+        )
+    if not rows:
+        print("（沒有資料）")
+    print()
+    print(DISCLAIMER)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tokyo-housing-lab", epilog=DISCLAIMER)
     sub = parser.add_subparsers(dest="command")
@@ -85,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
     load.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
     load.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     load.set_defaults(handler=_load)
+
+    query = sub.add_parser("query", help="每季 ㎡ 單價中位數與筆數", epilog=DISCLAIMER)
+    query.add_argument("--city", default=TACHIKAWA, help="市區町村代碼（預設 13202 立川市）")
+    query.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    query.set_defaults(handler=_query)
     return parser
 
 
@@ -98,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)  # 每個請求我們自己會記一行，不用重複
     try:
         args.handler(args)
-    except (MissingApiKeyError, ReinfolibAPIError, RawFileError) as exc:
+    except (MissingApiKeyError, ReinfolibAPIError, RawFileError, FileNotFoundError) as exc:
         print(f"錯誤：{exc}", file=sys.stderr)
         return 1
     return 0

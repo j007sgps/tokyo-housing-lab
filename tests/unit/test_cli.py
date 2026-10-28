@@ -93,3 +93,34 @@ def test_fake_key_not_printed(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr()
     assert "401" in out.err
     assert FAKE_KEY not in out.out + out.err
+
+
+def test_query_without_db_fails_cleanly(tmp_path, capsys):
+    assert cli.main(["query", "--db", str(tmp_path / "none.duckdb")]) == 1
+    assert "load" in capsys.readouterr().err
+    assert not (tmp_path / "none.duckdb").exists()
+
+
+def test_query_prints_table_and_disclaimer(tmp_path, capsys):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    for pc in ("01", "02"):
+        shutil.copy(FIXTURES / f"xit001_13202_2024Q1_p{pc}_sample.json", raw / f"xit001_13202_2024Q1_p{pc}.json")
+    db = tmp_path / "t.duckdb"
+    assert cli.main(["load", "--raw-dir", str(raw), "--db", str(db)]) == 0
+    capsys.readouterr()
+    assert cli.main(["query", "--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert "2024Q1" in out and "取引" in out and "成約" in out
+    assert out.rstrip().endswith(DISCLAIMER)
+
+
+def test_query_other_city_has_no_rows(tmp_path, capsys):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    shutil.copy(FIXTURES / "xit001_13202_2024Q1_p01_sample.json", raw / "xit001_13202_2024Q1_p01.json")
+    db = tmp_path / "t.duckdb"
+    cli.main(["load", "--raw-dir", str(raw), "--db", str(db)])
+    capsys.readouterr()
+    assert cli.main(["query", "--db", str(db), "--city", "13101"]) == 0
+    assert "沒有資料" in capsys.readouterr().out
