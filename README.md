@@ -26,6 +26,8 @@ uv run tokyo-housing-lab analyze invest                    # 各區最近 10 年
 uv run tokyo-housing-lab analyze trend --price combined    # 用綜合指標（取引＋成約）；01＝取引（預設）、02＝成約
 uv run tokyo-housing-lab analyze trend --price hedonic     # 用品質調整指數（要估模型，十幾秒）
 uv run tokyo-housing-lab hedonic --validate                # 品質調整模型的係數、配適度、預測誤差
+uv run tokyo-housing-lab adjust                            # 時點修正係數 → DuckDB 的 time_adjustment 表（約 20 秒）
+uv run tokyo-housing-lab query --city 13202 --adjusted     # 每季中位數，多一欄換算成現在水準的中位數
 uv run tokyo-housing-lab map     # 產生 data/tokyo_map.html，用瀏覽器打開
 ```
 
@@ -75,6 +77,29 @@ ln(㎡ 單價) = 町名 + 市區町村×年 + 面積 + 屋齡 + 舊耐震 + 房�
 - 限制：API 沒有車站距離和樓層；特性的效果全東京、全期間共用；「屋齡 17 年」在不同年份是不同年代蓋的，
   新一代建物本身品質較好的部分也會算進漲幅；同一筆成交可能同時在取引和成約裡
 - 計算方式寫在 `src/tokyo_housing_lab/analysis/hedonic.py`
+
+### 時點修正
+
+把舊的成交價換算成「最新 4 季的平均水準」（例：中央区 2020Q1 的成交 × 1.77）。用品質調整模型，期間設成
+「以最新一季為終點、每 4 季一期」，再加上全東京共用的季內走勢（2025 年光是一年內就漲了約 6%，只修到年不夠）：
+
+```
+ln(係數) = [區×期間₀ ＋ 期間₀ 內 4 季的平均] − [區×期間_w ＋ 期間_w 內第 k 季]
+```
+
+- `adjust` 估一次模型，把每個「區 × 季」（2005Q3〜最新一季）的係數和 95% 區間寫進 `time_adjustment` 表（整張重寫）
+- 該區那一期或目標期不到 30 筆 → 用全東京的係數（`basis = 'tokyo'`），區間另外加上各區走勢的離散
+- 用法：`unit_price_per_m2 × factor`（join `city, year, quarter`）。例：
+
+  ```sql
+  SELECT t.*, t.unit_price_per_m2 * a.factor AS adjusted_unit_price
+  FROM transactions t JOIN time_adjustment a USING (city, year, quarter)
+  ```
+
+- 驗證：拿最新 4 季的成交當答案，用同町名、同屋齡帶、同面積帶的前 5 年成交中位數來估 —
+  不修正時平均低估 17%（誤差中位數 25%），修正後偏差 +2%（誤差中位數 16%）
+- 時點修正只換算「時間」，不處理物件組成：同一季賣的物件不同，修正後的中位數一樣會跳動
+- 新資料進來（`fetch` → `load`）後要重新執行 `adjust`，目標期會跟著移到新的最新 4 季
 
 邊界資料 `src/tokyo_housing_lab/map/tokyo_municipalities.geojson` 由 `scripts/prepare_boundaries.py` 產生：
 「国土数値情報（行政区域データ）」（国土交通省）を加工して作成（スマートニュース メディア研究所 japan-topography の簡略化データを使用）。

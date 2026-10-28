@@ -5,6 +5,7 @@
   query：每季 ㎡ 單價中位數與筆數（只讀 DuckDB）
   analyze：各市區町村的排行（購買／趨勢／投資模式，只讀 DuckDB）
   hedonic：品質調整指數的模型診斷（係數、配適度、驗證；只讀 DuckDB）
+  adjust：時點修正係數（舊成交 → 最新 4 季的水準），寫進 DuckDB 的 time_adjustment 表
   map  ：產生地圖 HTML（只讀 DuckDB）
 """
 
@@ -14,7 +15,7 @@ import math
 import re
 import sys
 from collections import Counter
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +23,7 @@ import numpy as np
 from tokyo_housing_lab import DISCLAIMER
 from tokyo_housing_lab.analysis import hedonic as hd
 from tokyo_housing_lab.analysis.municipalities import COMBINED, HEDONIC, INVEST_PRICE_CLASSIFICATION, build_analysis
+from tokyo_housing_lab.analysis.time_adjust import basis_counts, compute_time_adjustments
 from tokyo_housing_lab.analysis.trend import MIN_N
 from tokyo_housing_lab.config import MissingApiKeyError, load_api_key
 from tokyo_housing_lab.pipeline import DEFAULT_DB_PATH, DEFAULT_RAW_DIR, load_raw_dir
@@ -83,6 +85,9 @@ PRICE_LABELS = {"01": "取引", "02": "成約"}
 def _query(args: argparse.Namespace) -> None:
     if not args.db.is_file():
         raise FileNotFoundError(f"找不到資料庫 {args.db}，請先執行 load")
+    if args.adjusted:
+        _query_adjusted(args)
+        return
     with DuckDBStore(args.db) as store:
         rows = store.quarterly_median(args.city)
     print(f"市區町村 {args.city}　中古マンション等　㎡ 單價中位數（日圓／㎡）")
@@ -96,6 +101,61 @@ def _query(args: argparse.Namespace) -> None:
     if not rows:
         print("（沒有資料）")
     print()
+    print(DISCLAIMER)
+
+
+def _query_adjusted(args: argparse.Namespace) -> None:
+    with DuckDBStore(args.db) as store:
+        rows = store.query("quarterly_median_adjusted", city=args.city)
+    target = next((r["target"] for r in rows if r["target"]), None)
+    if rows and target is None:
+        raise ValueError("還沒有時點修正係數，請先執行 adjust")
+    print(f"市區町村 {args.city}　中古マンション等　㎡ 單價中位數（日圓／㎡）")
+    print(f"修正後 = 每筆成交 × 該季的時點修正係數，換算成 {target} 的平均水準")
+    print(f"{'期間':<8}{'種類':<4}{'中位數':>12}{'修正後':>12}{'筆數':>6}")
+    for r in rows:
+        median = f"{r['median_unit_price']:,.0f}"
+        adjusted = "-" if r["median_adjusted"] is None else f"{r['median_adjusted']:,.0f}"
+        mark = "＊" if r["basis"] == "tokyo" else ""
+        print(
+            f"{r['year']}Q{r['quarter']:<3}{PRICE_LABELS.get(r['price_classification'], r['price_classification']):<4}"
+            f"{median:>14}{adjusted:>14}{r['n']:>8}{mark}"
+        )
+    if not rows:
+        print("（沒有資料）")
+    else:
+        print("＊ 這區那一期樣本不足，用全東京的係數")
+    print()
+    print(NOT_ADVICE)
+    print(DISCLAIMER)
+
+
+def _adjust(args: argparse.Namespace) -> None:
+    if not args.db.is_file():
+        raise FileNotFoundError(f"找不到資料庫 {args.db}，請先執行 load")
+    with DuckDBStore(args.db) as store:
+        result = compute_time_adjustments(store, args.region)
+        written = store.replace_time_adjustments(result.rows(args.region), datetime.now())
+        names = {r["city"]: r["name"] for r in store.query("municipality_names", region=args.region)}
+    counts = basis_counts(result)
+    print(f"時點修正：換算成 {result.target} 的平均水準（{result.n:,} 筆成交估計，極端值 {result.outliers:,} 筆不用）")
+    print(
+        f"已寫入 time_adjustment：{written:,} 列（該區自己的指數 {counts['city']:,}、"
+        f"樣本不足用全東京 {counts['tokyo']:,}、無法修正 {counts[None]:,}）"
+    )
+    ly = result.last[0]
+    cols = [(ly - 10, 1), (ly - 5, 1), (ly - 1, 1)]
+    by_key = {(a.city, a.year, a.quarter): a for a in result.adjustments}
+    print("成交價 × 係數 ≈ 現在的水準（＊ = 樣本不足，用全東京的係數）")
+    print(f"  {'市區町村':<10}" + "".join(f"{y}Q{q:>1}".rjust(11) for y, q in cols))
+    for city in sorted({a.city for a in result.adjustments}):
+        cells = []
+        for y, q in cols:
+            a = by_key.get((city, y, q))
+            cells.append("—" if a is None or a.factor is None else f"×{a.factor:.2f}{'＊' if a.basis == 'tokyo' else ''}")
+        print(f"  {names.get(city, city):<10}" + "".join(c.rjust(11) for c in cells))
+    print()
+    print(NOT_ADVICE)
     print(DISCLAIMER)
 
 
@@ -266,6 +326,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     query = sub.add_parser("query", help="每季 ㎡ 單價中位數與筆數", epilog=DISCLAIMER)
     query.add_argument("--city", default=TACHIKAWA, help="市區町村代碼（預設 13202 立川市）")
+    query.add_argument("--adjusted", action="store_true", help="多一欄時點修正後的中位數（要先執行 adjust）")
     query.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     query.set_defaults(handler=_query)
 
@@ -289,6 +350,11 @@ def build_parser() -> argparse.ArgumentParser:
     hed.add_argument("--region", default=TOKYO)
     hed.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     hed.set_defaults(handler=_hedonic)
+
+    adj = sub.add_parser("adjust", help="時點修正係數：舊成交 → 最新 4 季的水準，寫進 time_adjustment 表", epilog=DISCLAIMER)
+    adj.add_argument("--region", default=TOKYO)
+    adj.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    adj.set_defaults(handler=_adjust)
 
     map_ = sub.add_parser("map", help="產生地圖 HTML（趨勢／購買／投資模式）", epilog=DISCLAIMER)
     map_.add_argument("--out", type=Path, default=DEFAULT_MAP_PATH, help=f"輸出位置（預設 {DEFAULT_MAP_PATH}）")

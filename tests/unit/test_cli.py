@@ -1,4 +1,5 @@
 import gzip
+import math
 import shutil
 
 import duckdb
@@ -224,3 +225,32 @@ def test_hedonic_command(hedonic_db, capsys):
     assert "屋齡（和 17 年比）" in out and "成約（和取引比" in out
     assert "品質調整模型" in out and "同町名同年的中位數" in out
     assert "不是投資建議" in out and out.rstrip().endswith(DISCLAIMER)
+
+
+# --- 時點修正 ---
+
+
+def test_query_adjusted_requires_adjust(analysis_db, capsys):
+    assert cli.main(["query", "--adjusted", "--city", "13102", "--db", str(analysis_db)]) == 1
+    assert "請先執行 adjust" in capsys.readouterr().err
+
+
+def test_adjust_then_query_adjusted(hedonic_db, capsys):
+    assert cli.main(["adjust", "--db", str(hedonic_db)]) == 0
+    out = capsys.readouterr().out
+    assert "換算成 2013Q1〜2013Q4 的平均水準" in out
+    assert "已寫入 time_adjustment：32 列" in out  # 2 區 × 16 季
+    assert "新宿区" in out and out.rstrip().endswith(DISCLAIMER)
+    with duckdb.connect(str(hedonic_db), read_only=True) as con:
+        rows = con.execute("SELECT year, quarter, factor, factor_low, factor_high, basis FROM time_adjustment WHERE city = '13104' ORDER BY year, quarter").fetchall()
+    assert len(rows) == 16 and all(r[5] == "city" for r in rows)
+    assert all(lo < f < hi for _, _, f, lo, hi, _ in rows)
+    # 目標期（2013 年）4 季的係數，幾何平均 = 1
+    assert math.prod(r[2] for r in rows if r[0] == 2013) == pytest.approx(1.0, abs=1e-9)
+    # 新宿区真實的走勢：2010 → 2013 漲了 e^0.15
+    assert math.prod(r[2] for r in rows if r[0] == 2010) ** 0.25 == pytest.approx(math.exp(0.15), rel=0.03)
+
+    assert cli.main(["query", "--adjusted", "--city", "13104", "--db", str(hedonic_db)]) == 0
+    out = capsys.readouterr().out
+    assert "修正後" in out and "2013Q1〜2013Q4" in out and "2010Q1" in out
+    assert out.rstrip().endswith(DISCLAIMER)

@@ -232,3 +232,18 @@ def test_gz_preferred_over_legacy_json_of_same_query(raw_dir, store):
     summary = load_raw_dir(raw_dir, store)
     assert "xit001_13202_2024Q1_p01.json" in summary.skipped_files
     assert count(store, "price_classification = '01'") == 3
+
+
+def test_replace_time_adjustments(store):
+    from datetime import datetime
+
+    def row(year, factor):
+        return {"region": "13", "city": "13101", "year": year, "quarter": 1, "target": "2025Q2〜2026Q1",
+                "factor": factor, "factor_low": None if factor is None else factor * 0.9,
+                "factor_high": None if factor is None else factor * 1.1, "basis": None if factor is None else "city", "n": 40}
+
+    assert store.replace_time_adjustments([row(2020, 1.5), row(2021, 1.3)], datetime(2026, 1, 1)) == 2
+    # 整張表換掉：上一次的列不留下
+    assert store.replace_time_adjustments([row(2022, 1.2), row(2005, None)], datetime(2026, 2, 1)) == 2
+    got = store.con.execute("SELECT year, factor, basis, computed_at FROM time_adjustment ORDER BY year").fetchall()
+    assert got == [(2005, None, None, datetime(2026, 2, 1)), (2022, 1.2, "city", datetime(2026, 2, 1))]

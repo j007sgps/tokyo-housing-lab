@@ -83,6 +83,22 @@ _FETCH_LOG_COLUMNS = [
 ]
 
 
+# 時點修正係數（tokyo-housing-lab adjust 寫入）：某區某季的成交 × factor ≈ target 期間的平均水準
+TIME_ADJUSTMENT_COLUMNS = [
+    ("region", "VARCHAR"),
+    ("city", "VARCHAR"),
+    ("year", "INTEGER"),
+    ("quarter", "INTEGER"),
+    ("target", "VARCHAR"),  # 例：2025Q2〜2026Q1
+    ("factor", "DOUBLE"),  # NULL = 無法修正（資料以前的季、全東京也沒有資料）
+    ("factor_low", "DOUBLE"),  # 95% 區間
+    ("factor_high", "DOUBLE"),
+    ("basis", "VARCHAR"),  # city = 該區自己的指數；tokyo = 樣本不足，用全東京的
+    ("n", "INTEGER"),  # 該區在那一期（4 季）的筆數
+    ("computed_at", "TIMESTAMP"),
+]
+
+
 class QuarterlyMedian(NamedTuple):
     year: int
     quarter: int
@@ -106,6 +122,7 @@ class DuckDBStore:
         self.con.execute("SET enable_progress_bar = false")  # 長查詢的進度條會混進 CLI 的輸出
         self._create("transactions", TRANSACTION_COLUMNS, ',\n  PRIMARY KEY ("raw_file", "row_index")')
         self._create("fetch_log", _FETCH_LOG_COLUMNS)
+        self._create("time_adjustment", TIME_ADJUSTMENT_COLUMNS, ',\n  PRIMARY KEY ("city", "year", "quarter")')
 
     def _create(self, table: str, columns: list[tuple[str, str]], extra: str = "") -> None:
         """表格不存在就建立；欄位和程式不一致（舊版本建的）就砍掉重建。
@@ -204,6 +221,21 @@ class DuckDBStore:
             self.con.rollback()
             raise
         return len(entries)
+
+    def replace_time_adjustments(self, rows: Iterable[Mapping[str, Any]], computed_at: datetime) -> int:
+        """時點修正係數整張表重寫（係數彼此相關，一次全部換掉才一致）。"""
+        names = [name for name, _ in TIME_ADJUSTMENT_COLUMNS]
+        values = [[computed_at if n == "computed_at" else r[n] for n in names] for r in rows]
+        self.con.begin()
+        try:
+            self.con.execute("DELETE FROM time_adjustment")
+            if values:
+                self.con.executemany(f"INSERT INTO time_adjustment VALUES ({', '.join('?' for _ in names)})", values)
+            self.con.commit()
+        except BaseException:
+            self.con.rollback()
+            raise
+        return len(values)
 
     def query(self, name: str, **params: Any) -> list[dict[str, Any]]:
         """執行 queries/<name>.sql，每一列回傳成 {欄位名: 值}。"""
