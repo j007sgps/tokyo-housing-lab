@@ -66,6 +66,8 @@ def test_offset_drifting_gap_has_tau2():
     steady, _ = fit_offset(y01, {y: stat(y01[y].median / 1.03, n=2000) for y in OVERLAP})
     assert off.tau2 > 0.005
     assert off.se > 3 * steady.se
+    assert off.unstable and not steady.unstable
+    assert off.gaps[2021] == pytest.approx(math.log(1.2))
 
 
 def test_offset_matches_hand_computed_dl():
@@ -81,6 +83,7 @@ def test_offset_matches_hand_computed_dl():
     ws = [1 / (x + tau2) for x in v]
     off, _ = fit_offset(y01, y02)
     assert off.tau2 == pytest.approx(tau2)
+    assert off.unstable == (q > 5.991)  # 自由度 2
     assert off.log == pytest.approx(sum(a * b for a, b in zip(ws, d, strict=True)) / sum(ws))
     assert off.se == pytest.approx(math.sqrt(1 / sum(ws)))
 

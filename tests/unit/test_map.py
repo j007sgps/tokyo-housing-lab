@@ -7,7 +7,7 @@ import pytest
 
 from test_municipalities import build_synthetic_db
 from tokyo_housing_lab import DISCLAIMER
-from tokyo_housing_lab.analysis.municipalities import build_analysis
+from tokyo_housing_lab.analysis.municipalities import COMBINED, build_analysis
 from tokyo_housing_lab.map.build import BOUNDARY_CREDIT, NOT_ADVICE, build_map_data, render_html
 from tokyo_housing_lab.storage.duckdb_store import DuckDBStore
 
@@ -62,6 +62,15 @@ def test_map_data_structure(analysis):
     assert chuo["latest"]["01"]["status"] == "ok" and chuo["latest"]["01"]["n"] == 161
     assert chuo["yearly"]["01"][0][:2] == [2006, 162]
     assert d["municipalities"]["13999"]["latest"]["01"]["status"] == "insufficient"
+    # 綜合：年份和最新 4 季的期間跟著取引；投資模式可以選綜合或取引
+    assert list(d["priceTypes"]) == ["combined", "01", "02"]
+    assert d["priceTypes"]["combined"] == {"label": "綜合", "completeYears": [2006], "latestPeriod": "2006Q2〜2007Q1"}
+    assert d["investPriceTypes"] == ["combined", "01"]
+    # 成約沒有完整年 → 無法換算，綜合就是取引
+    assert chuo["offset"] == {"status": "insufficient", "years": 0}
+    assert chuo["latest"]["combined"]["median"] == chuo["latest"]["01"]["median"]
+    assert chuo["yearly"]["combined"] == [[2006, 162, chuo["yearly"]["01"][0][2]]]
+    assert set(chuo["invest"]) == {"01", "combined"}
 
 
 def test_growth_pairs_match_analysis(tmp_path):
@@ -72,6 +81,7 @@ def test_growth_pairs_match_analysis(tmp_path):
     for y, base in ((2010, 400_000), (2011, 440_000), (2012, 500_000)):
         for q in (1, 2, 3, 4):
             rows = rows_for("13104", "新宿区", y, q, "01", [base + i * 100 for i in range(20)])
+            rows += rows_for("13104", "新宿区", y, q, "02", [base * 9 // 10 + i * 90 for i in range(20)])  # 剛好便宜一成
             rows += rows_for("13999", "小村", y, q, "01", [base, base + 1])  # 每年只有 8 筆
             if y == 2011:
                 rows += rows_for("13998", "半村", y, q, "01", [base + i for i in range(10)])  # 只有 2011 年夠
@@ -91,12 +101,22 @@ def test_growth_pairs_match_analysis(tmp_path):
     # 任何一年樣本不足的組合不放（地圖上就是灰色）
     assert d["municipalities"]["13999"]["growth"]["01"] == {}
     assert d["municipalities"]["13998"]["growth"]["01"] == {}
+    # 綜合也一樣和 analysis 一致；3 個重疊年 → 可以換算，落差剛好 1/0.9
+    gc = a.growth("13104", COMBINED, 2010, 2012)
+    combined = d["municipalities"]["13104"]["growth"]["combined"]
+    assert combined["2010-2012"] == [round(gc.total, 4), round(gc.ci_low, 4), round(gc.ci_high, 4), int(gc.status == "uncertain")]
+    assert combined["2010-2012"][0] == pytest.approx(pairs["2010-2012"][0], abs=1e-3)
+    off = d["municipalities"]["13104"]["offset"]
+    assert off["status"] == "ok" and off["years"] == 3 and off["unstable"] is False
+    assert off["pct"] == pytest.approx(1 / 0.9 - 1, abs=1e-3)
+    assert off["low"] < off["pct"] < off["high"]
+    assert [y for y, _ in off["gaps"]] == [2010, 2011, 2012]
 
 
 def test_insufficient_growth_pairs_are_omitted(analysis):
     d = build_map_data(analysis, GENERATED)
     # 只有一個完整年，沒有任何起訖組合
-    assert d["municipalities"]["13102"]["growth"] == {"01": {}, "02": {}}
+    assert d["municipalities"]["13102"]["growth"] == {"combined": {}, "01": {}, "02": {}}
 
 
 # --- HTML ---

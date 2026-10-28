@@ -16,7 +16,7 @@ from datetime import date
 from pathlib import Path
 
 from tokyo_housing_lab import DISCLAIMER
-from tokyo_housing_lab.analysis.municipalities import INVEST_PRICE_CLASSIFICATION, build_analysis
+from tokyo_housing_lab.analysis.municipalities import COMBINED, INVEST_PRICE_CLASSIFICATION, build_analysis
 from tokyo_housing_lab.analysis.trend import MIN_N
 from tokyo_housing_lab.config import MissingApiKeyError, load_api_key
 from tokyo_housing_lab.pipeline import DEFAULT_DB_PATH, DEFAULT_RAW_DIR, load_raw_dir
@@ -111,27 +111,29 @@ def _analyze(args: argparse.Namespace) -> None:
     with DuckDBStore(args.db) as store:
         a = build_analysis(store, args.region)
     pc = args.price
-    label = PRICE_LABELS[pc]
+    label = "綜合（取引＋換算後的成約，取引水準）" if pc == COMBINED else f"{PRICE_LABELS[pc]}價格"
+    # 綜合的年份、最新 4 季期間都跟著取引
+    base_pc = INVEST_PRICE_CLASSIFICATION if pc == COMBINED else pc
     munis = list(a.municipalities.values())
     insufficient: list[str] = []
 
     if args.mode == "buy":
-        y1, q1, y2, q2 = a.latest_period[pc]
-        print(f"購買模式：{label}價格，{y1}Q{q1}〜{y2}Q{q2} 的 ㎡ 單價中位數（萬日圓／㎡）")
-        rows = [(m, m.latest[pc]) for m in munis]
+        y1, q1, y2, q2 = a.latest_period[base_pc]
+        print(f"購買模式：{label}，{y1}Q{q1}〜{y2}Q{q2} 的 ㎡ 單價中位數（萬日圓／㎡）")
+        rows = [(m, m.combined.latest if pc == COMBINED else m.latest[pc]) for m in munis if pc != COMBINED or m.combined]
         for m, p in sorted(rows, key=lambda r: -(r[1].median or 0)):
             if p.status == "insufficient":
                 insufficient.append(f"{m.name}({p.n})")
                 continue
             print(f"  {m.name:<10}{_man(p.median):>7}  （95% {_man(p.ci_low)}〜{_man(p.ci_high)}，{p.n} 筆）")
     elif args.mode == "trend":
-        years = a.complete_years.get(pc, [])
+        years = a.complete_years.get(base_pc, [])
         start = args.start or (years[-1] - 10 if len(years) > 10 else years[0])
         end = args.end or years[-1]
         for y in (start, end):
             if y not in years:
-                raise ValueError(f"{label}價格沒有 {y} 年的完整資料（可選：{years[0]}〜{years[-1]}）")
-        print(f"趨勢模式：{label}價格，{start} → {end} 年 ㎡ 單價中位數的漲幅")
+                raise ValueError(f"{label}沒有 {y} 年的完整資料（可選：{years[0]}〜{years[-1]}）")
+        print(f"趨勢模式：{label}，{start} → {end} 年 ㎡ 單價中位數的漲幅")
         rows = [(m, a.growth(m.city, pc, start, end)) for m in munis]
         for m, g in sorted(rows, key=lambda r: -(r[1].total if r[1].total is not None else -9)):
             if g.status == "insufficient":
@@ -142,10 +144,12 @@ def _analyze(args: argparse.Namespace) -> None:
                 f"  {m.name:<10}{_pct(g.total):>8}  （每年 {_pct(g.annual)}，95% {_pct(g.ci_low)}〜{_pct(g.ci_high)}）{mark}"
             )
     else:
-        pc = INVEST_PRICE_CLASSIFICATION
-        t0 = next(m.invest for m in munis if m.invest)
-        print(f"投資模式：取引價格，{t0.first_year}〜{t0.last_year} 年的長期趨勢（年成長率）")
-        rows = [(m, m.invest) for m in munis if m.invest]
+        if pc not in (INVEST_PRICE_CLASSIFICATION, COMBINED):
+            raise ValueError("投資模式只能用取引價格（01）或綜合（combined）：成約價格不到 10 年")
+        trend_of = (lambda m: m.combined and m.combined.invest) if pc == COMBINED else (lambda m: m.invest)
+        rows = [(m, trend_of(m)) for m in munis if trend_of(m)]
+        t0 = rows[0][1]
+        print(f"投資模式：{label}，{t0.first_year}〜{t0.last_year} 年的長期趨勢（年成長率）")
         for m, t in sorted(rows, key=lambda r: -(r[1].annual if r[1].annual is not None else -9)):
             if t.status == "insufficient":
                 insufficient.append(f"{m.name}({t.years_used}年)")
@@ -211,7 +215,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     analyze = sub.add_parser("analyze", help="各市區町村的排行：購買／趨勢／投資模式", epilog=DISCLAIMER)
     analyze.add_argument("mode", choices=["buy", "trend", "invest"], help="buy＝最新價格、trend＝起訖年漲幅、invest＝長期趨勢")
-    analyze.add_argument("--price", choices=["01", "02"], default="01", help="01＝取引價格（預設）、02＝成約價格")
+    analyze.add_argument(
+        "--price",
+        choices=["01", "02", COMBINED],
+        default="01",
+        help="01＝取引價格（預設）、02＝成約價格、combined＝綜合（取引＋換算成取引水準的成約）",
+    )
     analyze.add_argument("--from", dest="start", type=int, help="趨勢模式的起年（預設：最新完整年的 10 年前）")
     analyze.add_argument("--to", dest="end", type=int, help="趨勢模式的迄年（預設：最新的完整年）")
     analyze.add_argument("--region", default=TOKYO)

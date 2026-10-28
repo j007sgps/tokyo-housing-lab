@@ -24,7 +24,7 @@ INVEST_MAX_CI_WIDTH = 0.06  # 年成長率的 95% 區間寬度超過 6 個百分
 
 # 中位數的標準誤 ≈ √(π/2) × σ / √n（大樣本、近似常態時）
 _MEDIAN_SE_FACTOR = math.sqrt(math.pi / 2)
-_Z95 = 1.959964
+Z95 = 1.959964
 # t 分布 97.5% 分位數（自由度 1〜30），算最小平方法斜率的區間用；不想為了這張表裝 scipy
 _T95 = {
     1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228,
@@ -69,7 +69,7 @@ def latest_price(stat: YearStat | None) -> Price:
 def price_from_log(log_median: float, se: float, n: int) -> Price:
     """已知 ln(中位數) 和它的標準誤 → Price。"""
     m = math.exp(log_median)
-    return Price(m, m * math.exp(-_Z95 * se), m * math.exp(_Z95 * se), n, "ok")
+    return Price(m, m * math.exp(-Z95 * se), m * math.exp(Z95 * se), n, "ok")
 
 
 @dataclass(frozen=True)
@@ -97,7 +97,7 @@ def growth_between(series: Mapping[int, YearStat], start_year: int, end_year: in
 
 def growth_from_log(start_year: int, end_year: int, d: float, se: float) -> Growth:
     """已知 log 漲幅 d 和它的標準誤 → Growth（區間、年率、狀態）。"""
-    low, high = math.exp(d - _Z95 * se) - 1, math.exp(d + _Z95 * se) - 1
+    low, high = math.exp(d - Z95 * se) - 1, math.exp(d + Z95 * se) - 1
     status: Status = "uncertain" if low <= 0 <= high else "ok"
     annual = math.exp(d / (end_year - start_year)) - 1
     return Growth(start_year, end_year, math.exp(d) - 1, annual, low, high, status)

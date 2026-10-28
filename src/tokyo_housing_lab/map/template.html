@@ -16,6 +16,7 @@
     --na: #c7cdd4;
     --hatch: rgba(22, 32, 43, 0.55);
     --boundary: #ffffff;
+    --warn: #a3620a;
     --font-display: "Shippori Mincho B1", "Hiragino Mincho ProN", "Yu Mincho", serif;
     --font-body: "Noto Sans TC", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif;
     --radius: 10px;
@@ -23,13 +24,13 @@
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: #0f141a; --panel: #18202a; --fg: #e5eaf0; --muted: #98a4b1; --line: #2a3542;
-      --accent: #7db3e3; --accent-ink: #0f141a; --na: #39434e; --hatch: rgba(229, 234, 240, 0.6); --boundary: #0f141a;
+      --accent: #7db3e3; --accent-ink: #0f141a; --na: #39434e; --hatch: rgba(229, 234, 240, 0.6); --boundary: #0f141a; --warn: #e3a64a;
       color-scheme: dark;
     }
   }
   :root[data-theme="dark"] {
     --bg: #0f141a; --panel: #18202a; --fg: #e5eaf0; --muted: #98a4b1; --line: #2a3542;
-    --accent: #7db3e3; --accent-ink: #0f141a; --na: #39434e; --hatch: rgba(229, 234, 240, 0.6); --boundary: #0f141a;
+    --accent: #7db3e3; --accent-ink: #0f141a; --na: #39434e; --hatch: rgba(229, 234, 240, 0.6); --boundary: #0f141a; --warn: #e3a64a;
     color-scheme: dark;
   }
   body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.6; }
@@ -73,6 +74,10 @@
   .tm-sub { color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
   .tm-badge { display: inline-block; font-size: .72rem; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); margin-left: 6px; vertical-align: middle; }
   .tm-badge.warn { border-color: var(--muted); }
+  .tm-note { margin: 10px 0 0; font-size: .82rem; color: var(--muted); }
+  .tm-warn { margin: 10px 0 0; font-size: .82rem; padding: 8px 10px; border-radius: 8px; border-left: 3px solid var(--warn);
+             background: color-mix(in srgb, var(--warn) 12%, transparent); }
+  .tm-warn b { color: var(--warn); font-weight: 500; }
   .tm-kv { width: 100%; border-collapse: collapse; font-size: .85rem; font-variant-numeric: tabular-nums; }
   .tm-kv th, .tm-kv td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: right; }
   .tm-kv th:first-child, .tm-kv td:first-child { text-align: left; }
@@ -114,7 +119,8 @@
     <div class="tm-field">
       <span class="tm-label">價格種類</span>
       <div class="tm-seg" role="group" aria-label="價格種類">
-        <button type="button" id="pc-01" data-pc="01" aria-pressed="true">取引價格</button>
+        <button type="button" id="pc-combined" data-pc="combined" aria-pressed="true">綜合</button>
+        <button type="button" id="pc-01" data-pc="01" aria-pressed="false">取引價格</button>
         <button type="button" id="pc-02" data-pc="02" aria-pressed="false">成約價格</button>
       </div>
     </div>
@@ -144,6 +150,7 @@
 
   <footer class="tm-notes">
     <p><strong>怎麼算的</strong>：中古マンション等的 ㎡ 單價（成交價 ÷ 面積）中位數。購買模式用最新 4 季；趨勢模式比較起年與迄年的年度中位數；投資模式用最近 10 個完整年的年度中位數取對數做最小平方法，得到每年的平均成長率。所有數字都附 95% 區間。</p>
+    <p><strong>綜合</strong>：取引價格（2005 年起）與成約價格（2021 年起，透過仲介的成交）合在一起的指標。同一區、同一年，兩者的中位數有落差（各區不同），所以先用 2021 年以後兩邊都有的年份估計每區的落差，把成約換算成取引的水準，再依誤差大小加權平均；2020 年以前只有取引。落差每年變動越大，成約的權重越小。數字以<strong>取引價格的水準</strong>表示。同一筆成交可能同時出現在兩邊（API 沒有交易 ID，無法去除重複），所以綜合的區間會稍微偏窄。</p>
     <p><strong>灰色與斜線</strong>：<span id="note-thresholds">—</span></p>
     <p><strong>限制</strong>：中位數會受「那年賣出的物件組成」（新舊、大小、地點）影響，還沒做時點修正或品質調整；API 的面積已四捨五入到 5㎡。<span id="note-advice">—</span></p>
     <p id="note-disclaimer">—</p>
@@ -165,7 +172,7 @@
   const years01 = pts["01"].completeYears;
   const state = {
     mode: "trend",
-    pc: "01",
+    pc: pts.combined ? "combined" : "01",
     start: years01[Math.max(0, years01.length - 11)],
     end: years01[years01.length - 1],
     selected: M[DEFAULT_CITY] ? DEFAULT_CITY : Object.keys(M)[0],
@@ -175,6 +182,7 @@
   const man = (yen) => (yen / 10000).toFixed(1);
   const pct = (x) => (x > 0 ? "+" : x < 0 ? "−" : "±") + Math.abs(x * 100).toFixed(1) + "%";
   const fmtN = d3.format(",");
+  const pcLabel = (pc) => (pc === "combined" ? "綜合，取引水準" : pts[pc].label);
   const nameOf = (code, fallback) => (M[code] ? M[code].name.replace(/^西多摩郡/, "") : fallback);
 
   // ---- 每個模式的值：{v, lo, hi, n, status} ----
@@ -193,7 +201,7 @@
       if (!g) return { status: "insufficient", n };
       return { v: g[0], lo: g[1], hi: g[2], n, status: g[3] ? "uncertain" : "ok" };
     }
-    const t = m.invest;
+    const t = m.invest[state.pc];
     if (!t || t.status === "insufficient") return { status: "insufficient", n: t ? `${t.years} 年` : "0 年" };
     return { v: t.annual, lo: t.low, hi: t.high, n: `${t.years} 年`, status: t.status };
   }
@@ -335,7 +343,7 @@
     const x = valueOf(code);
     const modeLabel = { trend: `${state.start} → ${state.end} 年漲幅`, buy: `最新 4 季（${pts[state.pc].latestPeriod}）㎡ 單價`, invest: `${data.investWindow[0]}〜${data.investWindow[1]} 年 年成長率` }[state.mode];
     const head = el("div");
-    head.append(el("div", "tm-sub", `${modeLabel}（${state.mode === "invest" ? "取引價格" : pts[state.pc].label}）`));
+    head.append(el("div", "tm-sub", `${modeLabel}（${pcLabel(state.pc)}）`));
     const big = el("div", "tm-big");
     if (x.status === "insufficient") {
       big.textContent = "樣本不足";
@@ -350,6 +358,7 @@
       ? `10 年中達到 ${T.minN} 筆的年份不到 ${T.investMinYears} 年（${x.n}）`
       : `需要每年（或最新 4 季）至少 ${T.minN} 筆；目前 ${x.n}`));
     panel.append(head);
+    drawOffset(m);
 
     // 最新 4 季
     panel.append(el("h3", null, `最新 4 季的 ㎡ 單價中位數（萬日圓）`));
@@ -373,7 +382,7 @@
     const c1 = el("div", "tm-chart");
     panel.append(c1);
     drawYearly(c1, m);
-    panel.append(el("p", "tm-sub", `空心點：當年未滿 ${T.minN} 筆，僅供參考。`));
+    panel.append(el("p", "tm-sub", `空心點：當年未滿 ${T.minN} 筆，僅供參考。${m.yearly.combined ? "虛線是綜合（取引水準）。" : ""}`));
 
     if (m.byAge.length) {
       panel.append(el("h3", null, `依建築年代（取引價格，${data.investWindow[1] - 4}〜${data.investWindow[1]} 年）`));
@@ -383,9 +392,32 @@
     }
   }
 
+  // 取引和成約的落差：綜合指標的換算依據；落差每年不穩定時提醒使用者分開看
+  function drawOffset(m) {
+    const o = m.offset;
+    if (!o) return;
+    if (o.status !== "ok") {
+      panel.append(el("p", "tm-note", `成約價格達到 ${T.minN} 筆的年份不到 3 年，無法換算，這區的綜合就是取引價格。`));
+      return;
+    }
+    const cheaper = o.pct >= 0 ? `成約比取引便宜約 ${Math.abs(o.pct * 100).toFixed(0)}%` : `成約比取引貴約 ${Math.abs(o.pct * 100).toFixed(0)}%`;
+    panel.append(el("p", "tm-note",
+      `這區的${cheaper}（${o.gaps[0][0]}〜${o.gaps[o.gaps.length - 1][0]} 年平均；取引比成約高 ${pct(o.low)}〜${pct(o.high)}，95% 區間）。綜合是把成約換算成取引水準後一起算。`));
+    if (o.unstable) {
+      const w = el("div", "tm-warn");
+      w.append(el("b", null, "兩種價格的落差每年不太一致"),
+        document.createTextNode(`（${o.gaps.map(([y, g]) => `${y} 年 ${pct(g)}`).join("、")}），差異比抽樣誤差能解釋的還大。綜合已調低成約的權重並放寬區間；兩者的走勢可能不同，建議切換到取引、成約分開看。`));
+      panel.append(w);
+    }
+  }
+
   function drawYearly(container, m) {
     const w = Math.max(260, panel.clientWidth - 30), h = 170, ml = 34, mr = 74, mt = 8, mb = 22;
-    const series = Object.keys(pts).map((pc, i) => ({ pc, label: pts[pc].label, color: i === 0 ? "var(--accent)" : "#d07a2c", rows: m.yearly[pc] || [] }))
+    const style = { "01": { color: "var(--accent)" }, "02": { color: "#d07a2c" }, combined: { color: "var(--fg)", dash: "5 4" } };
+    // 綜合只有在和取引不同（有換算成約）時才畫，不然會整條蓋在取引上
+    const showCombined = m.offset && m.offset.status === "ok";
+    const series = ["01", "02", "combined"].filter((pc) => pts[pc] && (pc !== "combined" || showCombined))
+      .map((pc) => ({ pc, label: pts[pc].label, ...style[pc], rows: m.yearly[pc] || [] }))
       .filter((s) => s.rows.length);
     const all = series.flatMap((s) => s.rows);
     if (!all.length) { container.append(el("p", "tm-sub", "沒有完整年的資料。")); return; }
@@ -405,8 +437,9 @@
     }
     const line = d3.line().x((r) => x(r[0])).y((r) => y(r[2]));
     for (const s of series) {
-      svg.append("path").datum(s.rows).attr("d", line).style("fill", "none").style("stroke", s.color).attr("stroke-width", 2)
-        .attr("stroke-linejoin", "round").attr("stroke-linecap", "round");
+      svg.append("path").datum(s.rows).attr("d", line).style("fill", "none").style("stroke", s.color).attr("stroke-width", s.dash ? 1.6 : 2)
+        .attr("stroke-dasharray", s.dash || null).attr("stroke-linejoin", "round").attr("stroke-linecap", "round");
+      if (s.dash) continue; // 綜合不畫點：每年的筆數是兩邊相加，可能有重複
       svg.append("g").selectAll("circle").data(s.rows).join("circle").attr("cx", (r) => x(r[0])).attr("cy", (r) => y(r[2])).attr("r", 2.6)
         .style("fill", (r) => (r[1] >= T.minN ? s.color : "var(--panel)")).style("stroke", s.color).attr("stroke-width", 1.2)
         .append("title").text((r) => `${r[0]} 年 ${s.label}：${man(r[2])} 萬（${fmtN(r[1])} 筆）`);
@@ -439,8 +472,8 @@
     body.replaceChildren();
     document.getElementById("rank-title").textContent = {
       trend: `${state.start} → ${state.end} 年 漲幅排行（${pts[state.pc].label}）`,
-      buy: `最新 4 季 ㎡ 單價排行（${pts[state.pc].label}，萬日圓／㎡）`,
-      invest: `${data.investWindow[0]}〜${data.investWindow[1]} 年 年成長率排行（取引價格）`,
+      buy: `最新 4 季 ㎡ 單價排行（${pcLabel(state.pc)}，萬日圓／㎡）`,
+      invest: `${data.investWindow[0]}〜${data.investWindow[1]} 年 年成長率排行（${pts[state.pc].label}）`,
     }[state.mode];
     document.getElementById("rank-col").textContent = { trend: "漲幅", buy: "中位數", invest: "年成長率" }[state.mode];
     const rows = Object.keys(M).map((code) => ({ code, ...valueOf(code) }));
@@ -486,12 +519,13 @@
   }
 
   function syncControls() {
-    if (state.mode === "invest") state.pc = data.investPriceType;
+    if (state.mode === "invest" && !data.investPriceTypes.includes(state.pc)) state.pc = data.investPriceTypes[0];
     document.querySelectorAll("[data-mode]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === state.mode)));
     document.querySelectorAll("[data-pc]").forEach((b) => {
       b.setAttribute("aria-pressed", String(b.dataset.pc === state.pc));
       const hasData = !!pts[b.dataset.pc] && (state.mode !== "trend" || pts[b.dataset.pc].completeYears.length >= 2);
-      b.disabled = !hasData || (state.mode === "invest" && b.dataset.pc !== data.investPriceType);
+      b.disabled = !hasData || (state.mode === "invest" && !data.investPriceTypes.includes(b.dataset.pc));
+      b.hidden = !pts[b.dataset.pc];
     });
     document.getElementById("years-field").hidden = state.mode !== "trend";
     if (state.mode === "trend") fillYears();
@@ -499,8 +533,8 @@
     e.textContent = {
       trend: `${state.start} 年到 ${state.end} 年，年度 ㎡ 單價中位數漲了多少。紅色越深漲越多、藍色是下跌；斜線表示 95% 區間包含 0，看不出漲跌。`,
       buy: `最新 4 季（${pts[state.pc].latestPeriod}）的 ㎡ 單價中位數。顏色越深越貴。`,
-      invest: `${data.investWindow[0]}〜${data.investWindow[1]} 年的長期趨勢：每年平均成長多少。只是把過去的走勢延伸來看，不是預測；斜線表示區間太寬、不確定。成約價格只有 2021 年以後的資料，所以只用取引價格。`,
-    }[state.mode];
+      invest: `${data.investWindow[0]}〜${data.investWindow[1]} 年的長期趨勢：每年平均成長多少。只是把過去的走勢延伸來看，不是預測；斜線表示區間太寬、不確定。成約價格只有 2021 年以後的資料，不能單獨選。`,
+    }[state.mode] + (state.pc === "combined" ? "「綜合」是取引和換算後的成約合在一起的指標（說明見頁尾）。" : "");
   }
 
   function render() {

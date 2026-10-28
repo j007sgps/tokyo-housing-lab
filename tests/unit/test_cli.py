@@ -156,6 +156,19 @@ def test_analyze_invest_all_insufficient(analysis_db, capsys):
     assert "樣本不足" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("mode", ["buy", "invest"])
+def test_analyze_combined(analysis_db, capsys, mode):
+    assert cli.main(["analyze", mode, "--price", "combined", "--db", str(analysis_db)]) == 0
+    out = capsys.readouterr().out
+    assert "綜合" in out
+    assert out.rstrip().endswith(DISCLAIMER)
+
+
+def test_analyze_invest_rejects_seiyaku(analysis_db, capsys):
+    assert cli.main(["analyze", "invest", "--price", "02", "--db", str(analysis_db)]) == 1
+    assert "10 年" in capsys.readouterr().err
+
+
 def test_analyze_without_db(tmp_path, capsys):
     assert cli.main(["analyze", "buy", "--db", str(tmp_path / "none.duckdb")]) == 1
     assert "load" in capsys.readouterr().err

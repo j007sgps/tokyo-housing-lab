@@ -23,6 +23,7 @@ uv run tokyo-housing-lab query   # 每季 ㎡ 單價中位數與筆數（中古�
 uv run tokyo-housing-lab analyze buy                       # 各區最新 4 季的 ㎡ 單價中位數排行
 uv run tokyo-housing-lab analyze trend --from 2015 --to 2025  # 各區起訖年的漲幅排行
 uv run tokyo-housing-lab analyze invest                    # 各區最近 10 年的年成長率排行
+uv run tokyo-housing-lab analyze trend --price combined    # 用綜合指標（取引＋成約）；01＝取引（預設）、02＝成約
 uv run tokyo-housing-lab map     # 產生 data/tokyo_map.html，用瀏覽器打開
 ```
 
@@ -34,7 +35,24 @@ uv run tokyo-housing-lab map     # 產生 data/tokyo_map.html，用瀏覽器打�
 - **購買模式**：最新 4 季的 ㎡ 單價中位數，顏色越深越貴
 - **投資模式**：最近 10 年的年成長率（過去走勢的整理，不是預測）
 - 點地圖上的區或排行裡的名字，右側（手機在下方）會顯示詳細資料：最新價格、每年的中位數走勢、建築年代別中位數
+- 價格種類可切換 **綜合**（預設）／取引價格／成約價格；投資模式可選綜合或取引（成約不到 10 年）
 - 灰色＝樣本不足（一年少於 30 筆）；斜線＝區間包含 0（看不出漲跌）或區間太寬（不確定）
+
+### 綜合指標（取引＋成約）
+
+取引價格從 2005 年起、歷史長；成約價格（透過仲介的成交）只有 2021 年起。兩者的漲跌很一致，
+但同一區、同一年的價格水準有落差（各區不同，實測 −3%〜+53%），不能把成交直接混在一起算。綜合指標的做法：
+
+1. 每區用 2021 年以後兩邊都有 30 筆以上的年份（至少 3 年），估計「取引比成約高多少」。
+   用 random-effects（DerSimonian–Laird），落差每年的變動（τ²）也一起估計
+2. 把成約換算成取引的水準，每年和取引依誤差大小加權平均。落差越不穩定，成約的權重越小；2020 年以前只有取引
+3. 誤差以「各觀測值的線性組合」精確計算，換算本身的誤差也算進去
+4. 三種模式都能用：趨勢（綜合序列的漲幅）、購買（以取引水準表示的最新價格）、投資（綜合序列 10 年的最小平方法）
+
+- 重疊年不足的區，綜合就是取引（面板上會註明）
+- 落差每年的差異大到抽樣誤差解釋不了的區（Q 檢定 5%），詳細面板會提醒：兩者走勢可能不同，請分開看
+- 已知限制：同一筆成交可能同時出現在取引和成約裡（API 沒有交易 ID，無法去除重複），綜合的區間會稍微偏窄
+- 計算方式寫在 `src/tokyo_housing_lab/analysis/combined.py`
 
 邊界資料 `src/tokyo_housing_lab/map/tokyo_municipalities.geojson` 由 `scripts/prepare_boundaries.py` 產生：
 「国土数値情報（行政区域データ）」（国土交通省）を加工して作成（スマートニュース メディア研究所 japan-topography の簡略化データを使用）。

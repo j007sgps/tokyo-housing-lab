@@ -18,7 +18,7 @@
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from tokyo_housing_lab.analysis.trend import (
@@ -38,6 +38,13 @@ OFFSET_MIN_YEARS = 3  # 至少要幾個重疊年才換算成約
 
 Key = tuple[str, int | str]  # 觀測值：(價格種類, 年 或 "latest")
 LATEST = "latest"
+# 卡方分布 95% 分位數（自由度 1〜30）：判斷各年的落差是否「比抽樣誤差能解釋的還不一致」
+_CHI2_95 = {
+    1: 3.841, 2: 5.991, 3: 7.815, 4: 9.488, 5: 11.070, 6: 12.592, 7: 14.067, 8: 15.507, 9: 16.919, 10: 18.307,
+    11: 19.675, 12: 21.026, 13: 22.362, 14: 23.685, 15: 24.996, 16: 26.296, 17: 27.587, 18: 28.869, 19: 30.144,
+    20: 31.410, 21: 32.671, 22: 33.924, 23: 35.172, 24: 36.415, 25: 37.652, 26: 38.885, 27: 40.113, 28: 41.337,
+    29: 42.557, 30: 43.773,
+}  # fmt: skip
 
 
 @dataclass(frozen=True)
@@ -49,6 +56,8 @@ class Offset:
     tau2: float | None
     years: int  # 用到的重疊年數
     status: Literal["ok", "insufficient"]
+    gaps: dict[int, float] = field(default_factory=dict)  # 各重疊年的落差（ln）
+    unstable: bool = False  # 各年落差的差異大到抽樣誤差解釋不了（Q 檢定 5%）：兩種價格走勢不一致
 
     @property
     def pct(self) -> float | None:
@@ -103,7 +112,8 @@ def fit_offset(y01: Mapping[int, YearStat], y02: Mapping[int, YearStat]) -> tupl
     sws = sum(ws.values())
     a = {y: ws[y] / sws for y in years}
     theta = sum(a[y] * d[y] for y in years)
-    return Offset(theta, math.sqrt(1 / sws), tau2, k, "ok"), a
+    unstable = q > _CHI2_95[min(k - 1, 30)]
+    return Offset(theta, math.sqrt(1 / sws), tau2, k, "ok", d, unstable), a
 
 
 def _combine(
