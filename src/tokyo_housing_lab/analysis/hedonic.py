@@ -194,6 +194,7 @@ class Design:
     seiyaku_base_period: int | None
     seiyaku_cities: set[str]  # 取引、成約都夠多，才放成約的區
     big_districts: set[str]
+    absorbed: set[str]  # 當成基準的欄位（分類變數在資料裡沒有原本的基準類別時，最常見的那一類）
 
 
 @dataclass
@@ -213,7 +214,8 @@ def _categorical(prefix: str, column: np.ndarray, group) -> _Block:
 
 
 def _continuous(name: str, values: np.ndarray) -> _Block:
-    return _Block([name], np.zeros(len(values), dtype=int), values)
+    # 值是 0 的列不放：整欄都是 0 的欄位（例如資料裡沒有超過 90㎡ 的物件）就不會出現，也不會被當成共線
+    return _Block([name], np.where(values != 0, 0, -1), values)
 
 
 def design_matrix(
@@ -288,15 +290,22 @@ def design_matrix(
     if template is None:
         names: list[str] = []
         seen: set[str] = set()
-        for b in blocks:
-            used = np.unique(b.codes[usable & (b.codes >= 0)])
+        absorbed: set[str] = set()
+        for j, b in enumerate(blocks):
+            counts = np.bincount(b.codes[usable & (b.codes >= 0)], minlength=len(b.level_names))
+            used = np.nonzero(counts)[0]
+            # 每列都有值的分類變數（町名除外，它本來就沒有基準）卻沒有任何一列是基準類別：
+            # 整組加起來 = 常數，和町名共線 → 最常見的那一類改當基準（例如某區的改裝欄全部空白）
+            covers_all = j > 0 and b.values is None and (b.codes[usable] >= 0).all()
+            if covers_all and all(b.level_names[i] is not None for i in used.tolist()) and len(used):
+                absorbed.add(b.level_names[int(np.argmax(counts))])
             for nm in (b.level_names[i] for i in used.tolist()):
-                if nm is not None and nm not in seen:
+                if nm is not None and nm not in seen and nm not in absorbed:
                     seen.add(nm)
                     names.append(nm)
         index = {nm: i for i, nm in enumerate(names)}
     else:
-        names, index = template.names, template.index
+        names, index, absorbed = template.names, template.index, template.absorbed
 
     keep = usable.copy()
     if template is not None:
@@ -306,7 +315,7 @@ def design_matrix(
     # 每個區塊每列最多一個值 → 先排成「列 × 區塊」的欄位編號與值，攤平就是 CSR（不用排序，40 萬列也很快）
     # 水準 → 欄位：−2 = 基準（不放）、−1 = template 裡沒有（這列不能用）；codes == −1（這列沒有這組欄位）→ 最後一個 −2
     level_cols = [
-        np.array([-2 if nm is None else index.get(nm, -1) for nm in b.level_names] + [-2], dtype=np.int32)
+        np.array([-2 if nm is None or nm in absorbed else index.get(nm, -1) for nm in b.level_names] + [-2], dtype=np.int32)
         for b in blocks
     ]
     for b, lc in zip(blocks, level_cols, strict=True):
@@ -322,7 +331,7 @@ def design_matrix(
     clusters = (np.cumsum(used) - 1)[district[keep]]
     design = Design(
         X, names, index, clusters, city[keep], period[keep], seiyaku[keep],
-        base_period, seiyaku_base, seiyaku_cities, big,
+        base_period, seiyaku_base, seiyaku_cities, big, absorbed,
     )  # fmt: skip
     return design, keep
 

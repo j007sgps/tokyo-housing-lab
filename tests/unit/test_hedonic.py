@@ -326,3 +326,23 @@ def test_empty_column_is_named():
     X = sp.csr_matrix(np.column_stack([np.ones(4), np.zeros(4)]))
     with pytest.raises(ValueError, match="乙"):
         fit_ols(X, np.ones(4), np.arange(4), names=["甲", "乙"])
+
+
+def test_category_without_base_level_is_absorbed():
+    # 改裝欄全部空白（「不明」）：整組 = 常數，和町名共線 → 「不明」當基準；預測時也一樣
+    s = make_sample(np.random.default_rng(6), noise=0.02)
+    s.renovation = np.array([""] * len(s), dtype=object)
+    m = fit_hedonic(s, yearly_period(s))
+    assert "改裝:不明" in m.design.absorbed and "改裝:不明" not in m.design.index
+    _, keep = predict(m, s, yearly_period(s))
+    assert keep.all()
+    assert m.coef("舊耐震")[0] == pytest.approx(TRUE["old_seismic"], abs=0.02)
+
+
+def test_all_zero_continuous_column_is_left_out(exact_model):
+    s, _ = exact_model
+    small = s.subset(s.area < 90)  # 沒有超過 90㎡ 的物件：「ln面積>90」整欄是 0
+    m = fit_hedonic(small, yearly_period(small))
+    assert "ln面積>90" not in m.design.index
+    pred, keep = predict(m, small, yearly_period(small))
+    assert keep.all() and pred == pytest.approx(small.log_price, abs=1e-9)

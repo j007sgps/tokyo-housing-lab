@@ -211,6 +211,11 @@ class DuckDBStore:
         columns = [d[0] for d in cursor.description]
         return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
+    def query_columns(self, name: str, **params: Any) -> dict[str, Any]:
+        """執行 queries/<name>.sql，回傳 {欄位名: numpy 陣列}（幾十萬列的樣本用；可為 NULL 的數值欄位是 masked array）。"""
+        sql = files("tokyo_housing_lab.queries").joinpath(f"{name}.sql").read_text(encoding="utf-8")
+        return self.con.execute(sql, params).fetchnumpy()
+
     def quarterly_median(self, city: str) -> list[QuarterlyMedian]:
         """M1 完成條件的查詢（SQL 在 queries/quarterly_median.sql）。"""
         return [QuarterlyMedian(**row) for row in self.query("quarterly_median", city=city)]

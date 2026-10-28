@@ -3,7 +3,11 @@ from datetime import datetime
 
 import pytest
 
-from tokyo_housing_lab.analysis.municipalities import COMBINED, build_analysis
+import math
+
+import numpy as np
+
+from tokyo_housing_lab.analysis.municipalities import COMBINED, HEDONIC, build_analysis
 from tokyo_housing_lab.analysis.trend import MIN_N
 from tokyo_housing_lab.processing.clean import clean_record
 from tokyo_housing_lab.sources.base import SourceRecord
@@ -11,7 +15,8 @@ from tokyo_housing_lab.sources.reinfolib_records import FIELD_MAP
 from tokyo_housing_lab.storage.duckdb_store import DuckDBStore
 
 
-def rows_for(city, name, year, quarter, pc, prices, building_year="2000年"):
+def rows_for(city, name, year, quarter, pc, prices, building_year="2000年", area=50, **extra):
+    """prices 是 ㎡ 單價；extra 可以覆蓋其他欄位（district_name、floor_plan…）。"""
     raw_file = f"xit001_13_{year}Q{quarter}_p{pc}.json.gz"
     out = []
     for i, price in enumerate(prices):
@@ -19,11 +24,11 @@ def rows_for(city, name, year, quarter, pc, prices, building_year="2000年"):
             "property_type": "中古マンション等",
             "municipality": name,
             "municipality_code": city,
-            "trade_price": str(price * 50),
-            "area": "50",
+            "trade_price": str(round(price * area)),
+            "area": str(area),
             "building_year": building_year,
             "period": f"{year}年第{quarter}四半期",
-        }
+        } | extra
         out.append(clean_record(SourceRecord("api", "13", city, year, quarter, pc, raw_file, i, fields)))
     return out
 
@@ -131,3 +136,76 @@ def test_combined_falls_back_to_toriihiki_without_overlap_years(store):
     with pytest.raises(ValueError):
         a.growth("13102", COMBINED, 2006, 2006)
     assert a.growth("13102", COMBINED, 2005, 2006).status == "insufficient"
+
+
+# --- 品質調整指數（從 SQL 一路到指數）---
+
+HEDONIC_TRUTH = {"13104": {2010: 0.0, 2011: 0.05, 2012: 0.10, 2013: 0.15}, "13101": {2010: 0.0, 2011: 0.0, 2012: 0.02, 2013: 0.04}}
+HEDONIC_DISTRICTS = {"13104": {"西新宿": 0.3, "高田馬場": 0.0, "大久保": -0.2}, "13101": {"番町": 0.4, "神田": 0.0, "岩本町": -0.1}}
+
+
+def build_hedonic_db(path):
+    """2 區 × 2010〜2013 年。後面幾年賣的多是貴的町名、新的物件（中位數會多漲），成約 2012 年起、便宜一成。"""
+    rng = np.random.default_rng(7)
+    files: dict[str, list] = {}
+
+    def add(rows):
+        for r in rows:
+            same = files.setdefault(r["raw_file"], [])
+            same.append(r | {"row_index": len(same)})
+
+    names = {"13104": "新宿区", "13101": "千代田区"}
+    for city, districts in HEDONIC_DISTRICTS.items():
+        for year in range(2010, 2014):
+            shift = (year - 2010) / 3  # 0 → 1：組成越來越偏向貴的町名和新物件
+            weights = np.array([0.2 + 0.4 * shift, 0.4, 0.4 - 0.4 * shift])
+            for q in (1, 2, 3, 4):
+                for pc, k in (("01", 15), ("02", 6 if year >= 2012 else 0)):
+                    for _ in range(k):
+                        d = str(rng.choice(list(districts), p=weights / weights.sum()))
+                        area = int(rng.choice([20, 30, 45, 55, 70, 95, 120]))
+                        age = int(rng.integers(0, 12) if rng.random() < 0.3 + 0.4 * shift else rng.integers(12, 50))
+                        log_p = 13.5 + districts[d] + HEDONIC_TRUTH[city][year] - 0.01 * age + rng.normal(0, 0.03)
+                        log_p += math.log(0.9) if pc == "02" else 0.0
+                        add(rows_for(city, names[city], year, q, pc, [math.exp(log_p)], building_year=f"{year - age}年",
+                                     area=area, district_name=d, floor_plan="2LDK", structure="RC"))
+    with DuckDBStore(path) as s:
+        s.replace_files(files, datetime(2026, 1, 1))
+    return path
+
+
+@pytest.fixture(scope="module")
+def hedonic_analysis(tmp_path_factory):
+    with DuckDBStore(build_hedonic_db(tmp_path_factory.mktemp("h") / "h.duckdb")) as s:
+        return build_analysis(s)
+
+
+def test_hedonic_index_removes_composition_shift(hedonic_analysis):
+    a = hedonic_analysis
+    assert a.hedonic is not None and a.hedonic.r2 > 0.9
+    for city, truth in HEDONIC_TRUTH.items():
+        g = a.growth(city, HEDONIC, 2010, 2013)
+        assert g.total == pytest.approx(math.exp(truth[2013]) - 1, abs=0.03)
+        median = a.growth(city, "01", 2010, 2013)
+        assert median.total > g.total + 0.10  # 中位數多漲的部分是物件組成的變化
+
+
+def test_hedonic_latest_and_invest(hedonic_analysis):
+    m = hedonic_analysis.municipalities["13104"]
+    assert hedonic_analysis.latest_period["01"] == (2013, 1, 2013, 4)
+    assert m.hedonic.latest.status == "ok"
+    # 最新 4 季 = 2013 年整年：和年度模型的 2013 年水準幾乎一樣
+    assert math.log(m.hedonic.latest.median) == pytest.approx(m.hedonic.series.levels[2013], abs=0.02)
+    assert m.hedonic.invest.status == "insufficient"  # 只有 4 年
+
+
+def test_hedonic_can_be_skipped_and_falls_back(tmp_path, store, caplog):
+    assert build_analysis(store, with_hedonic=False).hedonic is None
+    # 合成資料的面積全是 50㎡：面積效果和町名分不開 → 不做品質調整，其他指標照常
+    a = build_analysis(store)
+    assert a.hedonic is None and a.municipalities["13102"].hedonic is None
+    assert "無法估計品質調整指數" in caplog.text
+    assert a.growth("13102", HEDONIC, 2005, 2006).status == "insufficient"
+    with pytest.raises(ValueError):
+        a.growth("13102", HEDONIC, 2006, 2006)
+    assert a.municipalities["13102"].latest["01"].status == "ok"
