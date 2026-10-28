@@ -192,7 +192,7 @@ def test_fetch_range_saves_skips_and_records_no_data(clock, tmp_path, sample_bod
             httpx.Response(404),  # 2021Q2 p02
         ],
     )
-    outcomes = fetch_range(client, store, "13202", (2021, 1), date(2021, 6, 1))
+    outcomes = fetch_range(client, store, "13202", (2021, 1), date(2021, 6, 1), refresh_recent=0)
 
     assert [(q.year, q.quarter, q.price_classification, o) for q, o in outcomes] == [
         (2021, 1, "01", "skipped"),
@@ -229,3 +229,30 @@ def test_fetch_range_error_stops_and_keeps_earlier_files(clock, tmp_path, sample
         fetch_range(client, store, "13202", (2021, 1), date(2021, 1, 15))
     # 先抓到的那一份已經存好，下次重跑會跳過它
     assert store.exists(QuarterQuery("13202", 2021, 1, "01"))
+
+
+def test_fetch_range_refreshes_latest_saved_quarters(clock, tmp_path, sample_body):
+    store = RawStore(tmp_path)
+    # 2021Q1〜2022Q2 都已經有檔案，今天是 2022Q3
+    for year, quarter in [(2021, 1), (2021, 2), (2021, 3), (2021, 4), (2022, 1), (2022, 2)]:
+        for pc in ("01", "02"):
+            store.save(QuarterQuery("13202", year, quarter, pc), b'{"old": true}')
+    client, requests = make_client(clock, [gzip_json(sample_body)] * 8 + [httpx.Response(404)] * 2)
+    outcomes = fetch_range(client, store, "13202", (2021, 1), date(2022, 8, 1), refresh_recent=4)
+
+    by_quarter = {(q.year, q.quarter, q.price_classification): o for q, o in outcomes}
+    assert by_quarter[(2021, 1, "01")] == by_quarter[(2021, 2, "02")] == "skipped"
+    for year, quarter in [(2021, 3), (2021, 4), (2022, 1), (2022, 2)]:  # 有資料的最新 4 季
+        assert by_quarter[(year, quarter, "01")] == by_quarter[(year, quarter, "02")] == "saved"
+    assert by_quarter[(2022, 3, "01")] == "no_data"
+    assert len(requests) == 10
+    assert store.path_for(QuarterQuery("13202", 2022, 2, "01")).read_bytes() == sample_body
+    assert store.path_for(QuarterQuery("13202", 2021, 2, "01")).read_bytes() == b'{"old": true}'
+
+
+def test_fetch_range_refresh_default_is_four(clock, tmp_path, sample_body):
+    store = RawStore(tmp_path)
+    store.save(QuarterQuery("13202", 2021, 1, "01"), b'{"old": true}')
+    client, requests = make_client(clock, [gzip_json(sample_body)] * 2)
+    fetch_range(client, store, "13202", (2021, 1), date(2021, 1, 15))
+    assert len(requests) == 2  # 唯一一季在最新 4 季內，01 也重抓

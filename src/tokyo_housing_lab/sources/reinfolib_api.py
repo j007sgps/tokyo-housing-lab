@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://www.reinfolib.mlit.go.jp/ex-api/external/XIT001"
 KEY_HEADER = "Ocp-Apim-Subscription-Key"
 DEFAULT_BACKOFF_SECONDS = (2.0, 4.0, 8.0, 16.0)
+# 最新幾季官方可能還會補資料，所以「有資料的最新 N 季」每次都重抓。N 是估計值，官方沒有公布修正期間
+REFRESH_RECENT_QUARTERS = 4
 
 
 class ReinfolibAPIError(RuntimeError):
@@ -175,18 +177,28 @@ def fetch_range(
     today: date,
     price_classifications: Sequence[str] = PRICE_CLASSIFICATIONS,
     force: bool = False,
+    refresh_recent: int = REFRESH_RECENT_QUARTERS,
 ) -> list[tuple[QuarterQuery, FetchOutcome]]:
     """從 start 那一季一路抓到 today 所在的那一季，01、02 分開請求。
 
     官方沒有「最新季」的查詢方式，所以抓到今天所在的季為止，還沒公開的季會回 404。
-    已經存在的原始檔直接跳過（force=True 才重抓）。404 不存檔，下次會再問一次，
+    已經存在的原始檔跳過，但「已有原始檔的季」裡最新的 refresh_recent 季照樣重抓；
+    force=True 則全部重抓。404 不存檔，下次會再問一次，
     因為「現在還沒公開」的季之後可能就有了。
     """
+    quarters = quarters_between(start, quarter_of(today))
+    saved = [
+        (y, q)
+        for y, q in quarters
+        if any(store.exists(QuarterQuery(city, y, q, pc)) for pc in price_classifications)
+    ]
+    recent = set(saved[-refresh_recent:]) if refresh_recent > 0 else set()
+
     outcomes: list[tuple[QuarterQuery, FetchOutcome]] = []
-    for year, quarter in quarters_between(start, quarter_of(today)):
+    for year, quarter in quarters:
         for pc in price_classifications:
             query = QuarterQuery(city, year, quarter, pc)
-            if not force and store.exists(query):
+            if not force and (year, quarter) not in recent and store.exists(query):
                 logger.info("%s 已有原始檔，跳過", query.label)
                 outcomes.append((query, "skipped"))
                 continue

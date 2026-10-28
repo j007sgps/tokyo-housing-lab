@@ -1,9 +1,7 @@
-"""讀取層共用的型別。
-
-統一格式 SourceRecord 要等步驟 2 看過真實欄位後才定義，這裡先只放「查詢條件」。
-"""
+"""讀取層共用的型別：查詢條件與統一格式 SourceRecord。"""
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 
@@ -48,3 +46,21 @@ def quarters_between(start: tuple[int, int], end: tuple[int, int]) -> list[tuple
         result.append((year, quarter))
         year, quarter = (year + 1, 1) if quarter == 4 else (year, quarter + 1)
     return result
+
+
+@dataclass(frozen=True)
+class SourceRecord:
+    """讀取層交給處理層的統一格式。處理層只認得這個，不知道資料從 API 還是 CSV 來。
+
+    fields 的 key 已經換成我們自己的欄位名（見各來源的對應表），
+    值仍然是原始字串，清理全部交給處理層。
+    """
+
+    source: str  # "api"（之後會有 "csv"）
+    city: str
+    year: int
+    quarter: int
+    price_classification: str
+    raw_file: str  # 來源檔名
+    row_index: int  # 在來源檔裡是第幾筆（從 0 開始）；API 沒有交易 ID，靠這個加檔名識別
+    fields: Mapping[str, str]
