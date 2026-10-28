@@ -1,6 +1,6 @@
 """看 data/raw/ 裡 XIT001 原始檔的欄位長什麼樣子（步驟 2 用來決定清理規則）。
 
-用法：uv run python scripts/profile_raw.py data/raw/xit001_*.json [--type 中古マンション等]
+用法：uv run python scripts/profile_raw.py data/raw/xit001_*.json [--type 中古マンション等] [--merge]
 只讀檔案，不打 API。
 """
 
@@ -43,7 +43,18 @@ def main() -> None:
     parser.add_argument("files", nargs="+", type=Path)
     parser.add_argument("--type", help="只看 Type 等於這個值的資料")
     parser.add_argument("--top", type=int, default=15, help="每欄最多列幾種值")
+    parser.add_argument("--merge", action="store_true", help="所有檔案合在一起統計（每個檔案只列一行摘要）")
     args = parser.parse_args()
+    if args.merge:
+        merged = []
+        for path in args.files:
+            doc = json.loads(path.read_bytes())
+            types = Counter(r.get("Type") for r in doc["data"])
+            print(f"{path.name}  status={doc.get('status')!r}  筆數={len(doc['data'])}  Type={dict(types)}")
+            merged.extend(r for r in doc["data"] if not args.type or r.get("Type") == args.type)
+        print(f"\n=== 合併 {len(args.files)} 個檔案" + (f"（只看 Type={args.type}）" if args.type else ""))
+        profile(merged, args.top)
+        return
     for path in args.files:
         doc = json.loads(path.read_bytes())
         rows = doc["data"]
