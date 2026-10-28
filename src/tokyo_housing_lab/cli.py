@@ -3,6 +3,7 @@
   fetch：打 API，原始檔存到 data/raw/（預設東京都全域 2005Q3〜；已存在的跳過，最新 4 季重抓）
   load ：只讀 data/raw/，清理後寫進 DuckDB（不打 API）
   query：每季 ㎡ 單價中位數與筆數（只讀 DuckDB）
+  analyze：各市區町村的排行（購買／趨勢／投資模式，只讀 DuckDB）
 """
 
 import argparse
@@ -14,6 +15,8 @@ from datetime import date
 from pathlib import Path
 
 from tokyo_housing_lab import DISCLAIMER
+from tokyo_housing_lab.analysis.municipalities import INVEST_PRICE_CLASSIFICATION, build_analysis
+from tokyo_housing_lab.analysis.trend import MIN_N
 from tokyo_housing_lab.config import MissingApiKeyError, load_api_key
 from tokyo_housing_lab.pipeline import DEFAULT_DB_PATH, DEFAULT_RAW_DIR, load_raw_dir
 from tokyo_housing_lab.sources.raw_store import RawStore
@@ -90,6 +93,74 @@ def _query(args: argparse.Namespace) -> None:
     print(DISCLAIMER)
 
 
+NOT_ADVICE = "※ 只是過去成交資料的整理，不是價格預測，也不是投資建議。中位數會受當年成交物件的組成（新舊、大小）影響。"
+
+
+def _man(yen: float) -> str:
+    return f"{yen / 10000:.1f}"
+
+
+def _pct(x: float) -> str:
+    return f"{x * 100:+.1f}%"
+
+
+def _analyze(args: argparse.Namespace) -> None:
+    if not args.db.is_file():
+        raise FileNotFoundError(f"找不到資料庫 {args.db}，請先執行 load")
+    with DuckDBStore(args.db) as store:
+        a = build_analysis(store, args.region)
+    pc = args.price
+    label = PRICE_LABELS[pc]
+    munis = list(a.municipalities.values())
+    insufficient: list[str] = []
+
+    if args.mode == "buy":
+        y1, q1, y2, q2 = a.latest_period[pc]
+        print(f"購買模式：{label}價格，{y1}Q{q1}〜{y2}Q{q2} 的 ㎡ 單價中位數（萬日圓／㎡）")
+        rows = [(m, m.latest[pc]) for m in munis]
+        for m, p in sorted(rows, key=lambda r: -(r[1].median or 0)):
+            if p.status == "insufficient":
+                insufficient.append(f"{m.name}({p.n})")
+                continue
+            print(f"  {m.name:<10}{_man(p.median):>7}  （95% {_man(p.ci_low)}〜{_man(p.ci_high)}，{p.n} 筆）")
+    elif args.mode == "trend":
+        years = a.complete_years.get(pc, [])
+        start = args.start or (years[-1] - 10 if len(years) > 10 else years[0])
+        end = args.end or years[-1]
+        for y in (start, end):
+            if y not in years:
+                raise ValueError(f"{label}價格沒有 {y} 年的完整資料（可選：{years[0]}〜{years[-1]}）")
+        print(f"趨勢模式：{label}價格，{start} → {end} 年 ㎡ 單價中位數的漲幅")
+        rows = [(m, a.growth(m.city, pc, start, end)) for m in munis]
+        for m, g in sorted(rows, key=lambda r: -(r[1].total if r[1].total is not None else -9)):
+            if g.status == "insufficient":
+                insufficient.append(m.name)
+                continue
+            mark = "  ？區間包含 0，看不出漲跌" if g.status == "uncertain" else ""
+            print(
+                f"  {m.name:<10}{_pct(g.total):>8}  （每年 {_pct(g.annual)}，95% {_pct(g.ci_low)}〜{_pct(g.ci_high)}）{mark}"
+            )
+    else:
+        pc = INVEST_PRICE_CLASSIFICATION
+        t0 = next(m.invest for m in munis if m.invest)
+        print(f"投資模式：取引價格，{t0.first_year}〜{t0.last_year} 年的長期趨勢（年成長率）")
+        rows = [(m, m.invest) for m in munis if m.invest]
+        for m, t in sorted(rows, key=lambda r: -(r[1].annual if r[1].annual is not None else -9)):
+            if t.status == "insufficient":
+                insufficient.append(f"{m.name}({t.years_used}年)")
+                continue
+            mark = "  ？區間太寬，不確定" if t.status == "uncertain" else ""
+            print(
+                f"  {m.name:<10}{_pct(t.annual):>7}/年  （95% {_pct(t.ci_low)}〜{_pct(t.ci_high)}，"
+                f"{t.years_used} 年）{mark}"
+            )
+    if insufficient:
+        print(f"  樣本不足（每年未滿 {MIN_N} 筆）：{'、'.join(insufficient)}")
+    print()
+    print(NOT_ADVICE)
+    print(DISCLAIMER)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tokyo-housing-lab", epilog=DISCLAIMER)
     sub = parser.add_subparsers(dest="command")
@@ -120,6 +191,15 @@ def build_parser() -> argparse.ArgumentParser:
     query.add_argument("--city", default=TACHIKAWA, help="市區町村代碼（預設 13202 立川市）")
     query.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     query.set_defaults(handler=_query)
+
+    analyze = sub.add_parser("analyze", help="各市區町村的排行：購買／趨勢／投資模式", epilog=DISCLAIMER)
+    analyze.add_argument("mode", choices=["buy", "trend", "invest"], help="buy＝最新價格、trend＝起訖年漲幅、invest＝長期趨勢")
+    analyze.add_argument("--price", choices=["01", "02"], default="01", help="01＝取引價格（預設）、02＝成約價格")
+    analyze.add_argument("--from", dest="start", type=int, help="趨勢模式的起年（預設：最新完整年的 10 年前）")
+    analyze.add_argument("--to", dest="end", type=int, help="趨勢模式的迄年（預設：最新的完整年）")
+    analyze.add_argument("--region", default=TOKYO)
+    analyze.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    analyze.set_defaults(handler=_analyze)
     return parser
 
 
@@ -133,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)  # 每個請求我們自己會記一行，不用重複
     try:
         args.handler(args)
-    except (MissingApiKeyError, ReinfolibAPIError, RawFileError, FileNotFoundError) as exc:
+    except (MissingApiKeyError, ReinfolibAPIError, RawFileError, FileNotFoundError, ValueError) as exc:
         print(f"錯誤：{exc}", file=sys.stderr)
         return 1
     return 0

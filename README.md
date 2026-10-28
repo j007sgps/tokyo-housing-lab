@@ -20,7 +20,14 @@ cp .env.example .env   # 再把 REINFOLIB_API_KEY 換成自己的金鑰
 uv run tokyo-housing-lab fetch   # 打 API，東京都全域 2005Q3〜 的原始 JSON 存到 data/raw/（已有的跳過，有資料的最新 4 季重抓）
 uv run tokyo-housing-lab load    # 只讀 data/raw/，清理後寫進 data/tokyo_housing_lab.duckdb（不打 API）
 uv run tokyo-housing-lab query   # 每季 ㎡ 單價中位數與筆數（中古マンション等）
+uv run tokyo-housing-lab analyze buy                       # 各區最新 4 季的 ㎡ 單價中位數排行
+uv run tokyo-housing-lab analyze trend --from 2015 --to 2025  # 各區起訖年的漲幅排行
+uv run tokyo-housing-lab analyze invest                    # 各區最近 10 年的年成長率排行
 ```
+
+`analyze` 的數字都附 95% 區間；一年（或最新 4 季）少於 30 筆的區標成「樣本不足」，
+區間包含 0 或太寬的標成「看不出漲跌／不確定」。計算方式寫在 `src/tokyo_housing_lab/analysis/trend.py`。
+這些只是過去成交資料的整理，不是價格預測，也不是投資建議。
 
 - `fetch --region 13202`：只抓某個市區町村（2 碼＝都道府縣、5 碼＝市區町村，預設 13 東京都全域）
 - `fetch --force`：全部重抓；`fetch --refresh-recent 0`：不重抓最新幾季；`fetch --start 2023Q1`：改起始季

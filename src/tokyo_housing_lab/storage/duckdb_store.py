@@ -204,7 +204,13 @@ class DuckDBStore:
             raise
         return len(entries)
 
+    def query(self, name: str, **params: Any) -> list[dict[str, Any]]:
+        """執行 queries/<name>.sql，每一列回傳成 {欄位名: 值}。"""
+        sql = files("tokyo_housing_lab.queries").joinpath(f"{name}.sql").read_text(encoding="utf-8")
+        cursor = self.con.execute(sql, params)
+        columns = [d[0] for d in cursor.description]
+        return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+
     def quarterly_median(self, city: str) -> list[QuarterlyMedian]:
         """M1 完成條件的查詢（SQL 在 queries/quarterly_median.sql）。"""
-        sql = files("tokyo_housing_lab.queries").joinpath("quarterly_median.sql").read_text(encoding="utf-8")
-        return [QuarterlyMedian(*row) for row in self.con.execute(sql, {"city": city}).fetchall()]
+        return [QuarterlyMedian(**row) for row in self.query("quarterly_median", city=city)]

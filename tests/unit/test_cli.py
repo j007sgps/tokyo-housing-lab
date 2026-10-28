@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from conftest import FAKE_KEY, FIXTURES, FakeClock
+from test_municipalities import build_synthetic_db
 from tokyo_housing_lab import DISCLAIMER, cli
 from tokyo_housing_lab.config import API_KEY_NAME, ApiKey
 from tokyo_housing_lab.sources.reinfolib_api import ReinfolibClient
@@ -124,3 +125,37 @@ def test_query_other_city_has_no_rows(tmp_path, capsys):
     capsys.readouterr()
     assert cli.main(["query", "--db", str(db), "--city", "13101"]) == 0
     assert "沒有資料" in capsys.readouterr().out
+
+
+# --- analyze ---
+
+
+@pytest.fixture
+def analysis_db(tmp_path):
+    """test_municipalities 的合成資料：中央区（樣本夠）＋小村（樣本不足）。"""
+    return build_synthetic_db(tmp_path / "t.duckdb")
+
+
+def test_analyze_buy(analysis_db, capsys):
+    assert cli.main(["analyze", "buy", "--db", str(analysis_db)]) == 0
+    out = capsys.readouterr().out
+    assert "2006Q2〜2007Q1" in out
+    assert "中央区" in out
+    assert "樣本不足" in out and "小村" in out
+    assert "不是投資建議" in out
+    assert out.rstrip().endswith(DISCLAIMER)
+
+
+def test_analyze_trend_rejects_year_without_complete_data(analysis_db, capsys):
+    assert cli.main(["analyze", "trend", "--from", "2005", "--to", "2006", "--db", str(analysis_db)]) == 1
+    assert "2005" in capsys.readouterr().err
+
+
+def test_analyze_invest_all_insufficient(analysis_db, capsys):
+    assert cli.main(["analyze", "invest", "--db", str(analysis_db)]) == 0
+    assert "樣本不足" in capsys.readouterr().out
+
+
+def test_analyze_without_db(tmp_path, capsys):
+    assert cli.main(["analyze", "buy", "--db", str(tmp_path / "none.duckdb")]) == 1
+    assert "load" in capsys.readouterr().err
