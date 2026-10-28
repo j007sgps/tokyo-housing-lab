@@ -65,6 +65,10 @@
   .tm-map path.ward:hover { stroke: var(--boundary); stroke-width: .8; }
   .tm-map circle.st { stroke: var(--panel); stroke-width: .8; cursor: pointer; vector-effect: non-scaling-stroke; }
   .tm-map circle.st:hover { stroke: var(--fg); stroke-width: 1.6; }
+  .tm-map image.depth { pointer-events: none; }
+  .tm-map path.school-hit { fill: transparent; fill-rule: evenodd; cursor: pointer; }
+  .tm-map path.school-hit:hover { fill: color-mix(in srgb, var(--accent) 22%, transparent); }
+  .tm-map path.school-line { fill: none; stroke: var(--fg); stroke-opacity: .6; stroke-width: .7; vector-effect: non-scaling-stroke; pointer-events: none; }
   .tm-map .route { fill: none; stroke: var(--muted); stroke-width: 2; stroke-linejoin: round; vector-effect: non-scaling-stroke; opacity: .7; }
   .tm-zoom { position: absolute; top: 20px; right: 20px; display: flex; gap: 4px; z-index: 2; }
   .tm-zoom button { font: inherit; font-size: .8rem; min-width: 30px; height: 30px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px;
@@ -137,6 +141,16 @@
         <button type="button" id="view-line" data-view="line" aria-pressed="false">路線</button>
       </div>
     </div>
+    <div class="tm-field" id="layer-field" hidden>
+      <label class="tm-label" for="layer-select">圖層</label>
+      <select id="layer-select">
+        <option value="">無</option>
+        <option value="flood">洪水（想定最大規模）</option>
+        <option value="surge">高潮</option>
+        <option value="elementary">小學校區</option>
+        <option value="junior">中學校區</option>
+      </select>
+    </div>
     <div class="tm-field">
       <span class="tm-label">模式</span>
       <div class="tm-seg" role="group" aria-label="模式">
@@ -199,6 +213,7 @@
     <p><strong>品質調整</strong>：<span id="note-hedonic">—</span></p>
     <p><strong>綜合</strong>：取引價格（2005 年起）與成約價格（2021 年起，透過仲介的成交）合在一起的指標。同一區、同一年，兩者的中位數有落差（各區不同），所以先用 2021 年以後兩邊都有的年份估計每區的落差，把成約換算成取引的水準，再依誤差大小加權平均；2020 年以前只有取引。落差每年變動越大，成約的權重越小。數字以<strong>取引價格的水準</strong>表示。同一筆成交可能同時出現在兩邊（API 沒有交易 ID，無法去除重複），所以綜合的區間會稍微偏窄。</p>
     <p id="note-station-wrap"><strong>車站</strong>：<span id="note-station">—</span></p>
+    <p id="note-layers-wrap" hidden><strong>淹水、學區</strong>：<span id="note-layers">—</span></p>
     <p><strong>灰色與斜線</strong>：<span id="note-thresholds">—</span></p>
     <p><strong>限制</strong>：中位數會受「那年賣出的物件組成」（新舊、大小、地點）影響，還沒做時點修正或品質調整；API 的面積已四捨五入到 5㎡。<span id="note-advice">—</span></p>
     <p id="note-disclaimer">—</p>
@@ -214,6 +229,7 @@
   const M = data.municipalities;
   const T = data.thresholds;
   const S = data.stations; // 車站資料（沒跑 fetch-stations 時是 null）
+  const L = data.layers; // 淹水、學區（沒跑 fetch-hazards 時是 null）
   const SL = S ? S.list : {};
   const lineByKey = S ? Object.fromEntries(S.lines.map((l) => [l.key, l])) : {};
   const DEFAULT_CITY = "13104"; // 一打開先選新宿区，面板就有內容
@@ -233,6 +249,7 @@
     end: years01[years01.length - 1],
     selected: M[DEFAULT_CITY] ? DEFAULT_CITY : Object.keys(M)[0],
     line: S && S.lines.length ? (lineByKey[DEFAULT_LINE] ? DEFAULT_LINE : S.lines[0].key) : null,
+    layer: "", // 疊在地圖上的圖層：""／flood／surge／elementary／junior
     station: S ? biggestIn(dataStations.filter((id) => SL[id].city === DEFAULT_CITY)) || biggestIn(dataStations) : null,
   };
   const stationView = () => state.view !== "city";
@@ -249,6 +266,26 @@
     if (view === "line" && !lineByKey[state.line].ids.includes(state.station)) state.station = biggestIn(lineByKey[state.line].ids);
   }
   const zoomOf = { city: null, station: null, line: null }; // 各顯示方式的縮放（null = 預設範圍）
+  const isDepth = () => state.layer === "flood" || state.layer === "surge";
+  const isSchool = () => state.layer === "elementary" || state.layer === "junior";
+  const LAYER_LABEL = { flood: "洪水（想定最大規模）", surge: "高潮", elementary: "小學校區", junior: "中學校區" };
+
+  // 學區的座標：1e-5 度的整數，第一點是絕對值、之後是差（build.py 的 encode_line）。只解一次
+  const decodeLine = (a) => {
+    const out = [];
+    let x = 0, y = 0;
+    for (let i = 0; i < a.length; i += 2) { x += a[i]; y += a[i + 1]; out.push([x / 1e5, y / 1e5]); }
+    return out;
+  };
+  const schoolsOf = {};
+  function schools(kind) {
+    if (!schoolsOf[kind]) {
+      schoolsOf[kind] = L.schools[kind].map((s) => ({
+        ...s, lines: s.outlines.map(decodeLine), polys: s.polygons.map((poly) => poly.map(decodeLine)),
+      }));
+    }
+    return schoolsOf[kind];
+  }
 
   // ---- 格式 ----
   const man = (yen) => (yen / 10000).toFixed(1);
@@ -345,6 +382,28 @@
   }
   const tipText = (x) => (x.status === "insufficient" ? "樣本不足" : fmtValue(x.v) + (x.status === "uncertain" ? "（不確定）" : ""));
 
+  // 圖層：淹水是 PNG（Mercator 的格網，地圖也是 Mercator，四個角對上就整張對齊）；學區是邊界線＋滑鼠用的透明面
+  function drawLayer(g, proj, onClick, tipExtra) {
+    if (!L || !state.layer) return;
+    if (isDepth()) {
+      const [west, south, east, north] = L.bounds;
+      const [x0, y0] = proj([west, north]), [x1, y1] = proj([east, south]);
+      g.append("image").attr("class", "depth").attr("href", L.images[state.layer]).attr("preserveAspectRatio", "none")
+        .attr("x", x0).attr("y", y0).attr("width", x1 - x0).attr("height", y1 - y0)
+        .attr("opacity", stationView() ? 0.55 : 1); // 車站的圓也是暖色：淹水調淡一點才分得出來
+      return;
+    }
+    const pathOf = (rings, close) => rings.map((r) => "M" + r.map((p) => proj(p).map((v) => v.toFixed(1)).join(",")).join("L") + (close ? "Z" : "")).join("");
+    const list = schools(state.layer);
+    const lg = g.append("g");
+    lg.selectAll("path.school-hit").data(list.flatMap((s) => s.polys.map((rings) => ({ s, rings })))).join("path")
+      .attr("class", "school-hit").attr("d", (d) => pathOf(d.rings, true))
+      .on("pointermove", (ev, d) => showTip(ev, d.s.name, tipExtra(d.s)))
+      .on("pointerleave", () => { tip.hidden = true; })
+      .on("click", (ev, d) => { if (onClick) onClick(d.s); });
+    lg.append("path").attr("class", "school-line").attr("d", list.map((s) => pathOf(s.lines, false)).join(""));
+  }
+
   function drawMap() {
     const w = mapEl.clientWidth || 600;
     const h = Math.round(w * (stationView() && w < 600 ? 0.9 : 0.56)); // 手機上車站很密，地圖高一點
@@ -369,6 +428,7 @@
         .attr("class", (f) => "area" + (f.properties.code === state.selected ? " selected" : ""))
         .attr("d", path)
         .style("fill", (f) => {
+          if (isDepth()) return "var(--ward)"; // 淹水的顏色和價格的色階會混在一起：底色改成中性
           const x = valueOf(f.properties.code);
           return x.status === "insufficient" ? "var(--na)" : color(x.v);
         })
@@ -376,8 +436,9 @@
         .on("pointerleave", () => { tip.hidden = true; })
         .on("click", (ev, f) => select(f.properties.code));
       // 不確定（區間包含 0 或太寬）：上面再疊一層斜線
-      g.selectAll("path.hatch").data(feats.filter((f) => valueOf(f.properties.code).status === "uncertain")).join("path")
+      g.selectAll("path.hatch").data(isDepth() ? [] : feats.filter((f) => valueOf(f.properties.code).status === "uncertain")).join("path")
         .attr("class", "hatch").attr("d", path).style("fill", "url(#hatch)").style("pointer-events", "none");
+      drawLayer(g, proj, (s) => select(s.city), (s) => `${nameOf(s.city, s.city)}：${tipText(valueOf(s.city))}`);
       // 選取的區描邊畫在最上層
       const sel = feats.find((f) => f.properties.code === state.selected);
       if (sel) g.append("path").attr("d", path(sel)).style("fill", "none").style("stroke", "var(--fg)")
@@ -386,6 +447,7 @@
       g.selectAll("path.area").data(feats).join("path").attr("class", "area ward").attr("d", path).style("fill", "var(--ward)")
         .on("pointermove", (ev, f) => showTip(ev, nameOf(f.properties.code, f.properties.name), "（行政區）"))
         .on("pointerleave", () => { tip.hidden = true; });
+      drawLayer(g, proj, null, (s) => nameOf(s.city, s.city));
       const ids = state.view === "line" ? lineByKey[state.line].ids : dataStations;
       const xy = (id) => proj([SL[id].lon, SL[id].lat]);
       if (state.view === "line") {
@@ -450,7 +512,7 @@
   function drawLegend(color) {
     const el = document.getElementById("legend");
     el.replaceChildren();
-    if (color.domain) {
+    if (color.domain && !(isDepth() && !stationView())) {
       const w = 240, h = 34;
       const svg = d3.select(el).append("svg").attr("width", w).attr("height", h).attr("viewBox", `0 0 ${w} ${h}`);
       const id = "lg-grad";
@@ -475,6 +537,17 @@
       el.append(k);
     };
     const hatch = { background: "repeating-linear-gradient(45deg, var(--hatch) 0 1.5px, transparent 1.5px 5px)" };
+    if (L && isDepth()) {
+      el.append(Object.assign(document.createElement("span"), { textContent: `${LAYER_LABEL[state.layer]}的浸水深：` }));
+      L.depthClasses.forEach((c) => key({ background: c.color }, c.label));
+      if (!stationView()) {
+        el.append(Object.assign(document.createElement("span"), { textContent: "（疊圖層時，區不依價格上色；點區看數字）" }));
+        return;
+      }
+    }
+    if (L && isSchool()) {
+      el.append(Object.assign(document.createElement("span"), { textContent: `細線是${LAYER_LABEL[state.layer]}的界線；滑鼠移上去看校名。品川區、荒川區沒有資料。` }));
+    }
     if (!stationView()) {
       key({ background: "var(--na)" }, "樣本不足／沒有成交");
       if (state.mode !== "buy") key(hatch, state.mode === "trend" ? "看不出漲跌（區間包含 0）" : "不確定（區間太寬）");
@@ -514,6 +587,25 @@
     panel.append(head);
   }
 
+  // 淹水比例（區：面積中；車站：周邊半徑內）＋學區
+  function drawHazard(h, where, schoolText) {
+    if (!h) return;
+    const [low, high] = L.thresholds;
+    panel.append(el("h3", null, `淹水的想定（${where}）`));
+    const kv = el("table", "tm-kv");
+    const tr0 = el("tr");
+    ["", `${low}m 以上`, `${high}m 以上`].forEach((t) => tr0.append(el("th", null, t)));
+    kv.append(tr0);
+    for (const [k, label] of [["flood", "洪水（想定最大規模）"], ["surge", "高潮"]]) {
+      const tr = el("tr");
+      tr.append(el("td", null, label), el("td", null, `${Math.round(h[k][0] * 100)}%`), el("td", null, `${Math.round(h[k][1] * 100)}%`));
+      kv.append(tr);
+    }
+    panel.append(kv);
+    panel.append(el("p", "tm-sub", `${low}m 以上＝淹到地板以上，${high}m 以上＝淹到 2 樓。想定最大規模是千年一次程度的降雨，不含下水道排不掉的內水氾濫。`));
+    panel.append(el("p", "tm-note", schoolText));
+  }
+
   function drawPanel() {
     if (stationView()) { drawStationPanel(); return; }
     const code = state.selected;
@@ -529,6 +621,12 @@
     drawHeadline(valueOf(code), `${modeLabel}（${pcLabel(state.pc)}）`, "最新 4 季");
     if (state.pc === "hedonic") drawHedonic(m);
     else drawOffset(m);
+    if (L && L.cities[code]) {
+      const n = L.cities[code].schools;
+      drawHazard(L.cities[code], "區的面積中", n.elementary || n.junior
+        ? `學區資料：小學 ${n.elementary} 校、中學 ${n.junior} 校（圖層選「小學校區」「中學校區」看界線）。`
+        : "國土數值情報沒有這個區的學區資料。");
+    }
 
     // 最新 4 季
     panel.append(el("h3", null, `最新 4 季的 ㎡ 單價（萬日圓）`));
@@ -609,6 +707,13 @@
     panel.append(el("p", "tm-note", cities.length > 1
       ? `成交物件所在的區：${cities.slice(0, 3).map(([c, n]) => `${nameOf(c, c)} ${fmtN(n)} 筆`).join("、")}${cities.length > 3 ? "…" : ""}（和「${cname}整體」比）`
       : `成交物件都在${cname}（${S.years[0]} 年以來 ${fmtN(s.total)} 筆）`));
+    if (L && L.stations[id]) {
+      const h = L.stations[id];
+      const names = [...h.elementary, ...h.junior];
+      drawHazard(h, `車站周邊 ${L.radius}m`, names.length
+        ? `車站所在的學區：${names.join("、")}（車站的位置，不是物件的位置）。`
+        : "車站所在的位置沒有學區資料（品川區、荒川區沒有資料）。");
+    }
     if (s.pax) panel.append(el("p", "tm-note", `乘降人數：1 日約 ${fmtN(s.pax)} 人（${s.paxYear} 年，各路線合計；JR 只算上車人數，和其他公司的定義不同）`));
 
     panel.append(el("h3", null, "每年的 ㎡ 單價（萬日圓，典型物件）"));
@@ -858,6 +963,12 @@
     sel.value = state.line;
   }
 
+  function layerExplain() {
+    if (!state.layer) return "";
+    if (isDepth()) return `　圖層：${LAYER_LABEL[state.layer]}的浸水深${stationView() ? "" : "（疊圖層時區不依價格上色）"}。`;
+    return `　圖層：${LAYER_LABEL[state.layer]}的界線。`;
+  }
+
   function syncControls() {
     if (state.mode === "invest" && !data.investPriceTypes.includes(state.pc)) state.pc = data.investPriceTypes[0];
     document.querySelectorAll("[data-view]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === state.view)));
@@ -870,7 +981,9 @@
     });
     document.getElementById("pc-field").hidden = stationView();
     document.getElementById("line-field").hidden = state.view !== "line";
-    document.getElementById("zoom").hidden = !stationView();
+    document.getElementById("zoom").hidden = !stationView() && !state.layer;
+    document.getElementById("layer-field").hidden = !L;
+    document.getElementById("layer-select").value = state.layer;
     if (state.view === "line") fillLines();
     document.getElementById("years-field").hidden = state.mode !== "trend";
     if (state.mode === "trend") fillYears();
@@ -880,7 +993,7 @@
         trend: `${state.start} 年到 ${state.end} 年，各車站典型物件價格漲了多少。紅色越深漲越多；半透明是 95% 區間包含 0，看不出漲跌。`,
         buy: `最近 12 季（${S.latestPeriod}）的成交換算成 ${S.target} 的水準後，各車站典型物件的 ㎡ 單價中位數（只看 4 季的話大部分車站筆數不夠）。顏色越深越貴。`,
         invest: `${S.investWindow[0]}〜${S.investWindow[1]} 年，各車站典型物件價格每年平均成長多少。只是把過去的走勢延伸來看，不是預測；半透明是區間太寬、不確定。`,
-      }[state.mode] + `車站一律用品質調整：每筆成交先換算成典型物件（取引、成約都換算成取引水準），再依「最寄駅」分組。${state.view === "line" ? "點圓或路線圖上的站名看細節。" : "點圓看細節。"}`;
+      }[state.mode] + `車站一律用品質調整：每筆成交先換算成典型物件（取引、成約都換算成取引水準），再依「最寄駅」分組。${state.view === "line" ? "點圓或路線圖上的站名看細節。" : "點圓看細節。"}` + layerExplain();
       return;
     }
     e.textContent = {
@@ -890,7 +1003,7 @@
     }[state.mode] + ({
       hedonic: "「品質調整」是同樣條件的典型物件的價格，排除了賣出物件新舊、大小、地段變化的影響（說明見頁尾）。",
       combined: "「綜合」是取引和換算後的成約合在一起的指標（說明見頁尾）。",
-    }[state.pc] || "");
+    }[state.pc] || "") + layerExplain();
   }
 
   function redraw() {
@@ -932,6 +1045,7 @@
   document.getElementById("year-start").addEventListener("change", (e) => { state.start = +e.target.value; render(); });
   document.getElementById("year-end").addEventListener("change", (e) => { state.end = +e.target.value; render(); });
   document.getElementById("line-select").addEventListener("change", (e) => setLine(e.target.value));
+  document.getElementById("layer-select").addEventListener("change", (e) => { state.layer = e.target.value; render(); });
   for (const k of ["in", "out", "ku", "all"]) document.getElementById(`zoom-${k}`).addEventListener("click", () => zoomApi && zoomApi[k]());
 
   // ---- 固定文字 ----
@@ -958,8 +1072,16 @@
     document.getElementById("note-station-wrap").hidden = true;
     document.getElementById("view-field").hidden = true;
   }
+  if (L) {
+    document.getElementById("note-layers-wrap").hidden = false;
+    document.getElementById("note-layers").textContent =
+      `洪水是各河川的「想定最大規模」（千年一次程度的降雨）浸水想定區域，好幾條河川重疊的地方取最深的；高潮是想定最大規模的高潮。兩者都不含下水道排不掉的內水氾濫。` +
+      `淹水先畫到約 31m 的格子上；區的比例是區的面積中達到門檻的格子比例，車站是車站座標半徑 ${L.radius}m 內的比例（都界附近的車站只算都內的部分）。` +
+      `成交只知道最寄駅、不知道確切位置，所以這是車站周邊的指標，不是每一筆物件的。學區是國土數值情報令和 5 年度的通學區域（品川區、荒川區沒有資料），可能和現在的指定不同；很多區的中學有學校選擇制。正式的資料請向各區市町村確認。`;
+  }
   document.getElementById("note-disclaimer").textContent = data.text.disclaimer;
-  document.getElementById("note-credit").textContent = `邊界資料：${data.text.boundaryCredit}` + (S ? `。車站資料：${data.text.stationCredit}` : "");
+  document.getElementById("note-credit").textContent = `邊界資料：${data.text.boundaryCredit}` + (S ? `。車站資料：${data.text.stationCredit}` : "") +
+    (L ? `。淹水、學區資料：${Object.values(L.credits).join("、")}` : "");
 
   render();
   let lastW = mapEl.clientWidth;

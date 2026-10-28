@@ -2,7 +2,8 @@
 
 東京中古公寓行情分析工具（個人學習用）。資料來源為國土交通省的公開 API（XIT001）。
 
-目前進度：M1（立川市 → DuckDB）完成；資料擴大到東京都全域（2005Q3〜最新季），並加上市區町村地圖（趨勢／購買／投資模式）。
+目前進度：M1（立川市 → DuckDB）完成；資料擴大到東京都全域（2005Q3〜最新季），並加上市區町村地圖（趨勢／購買／投資模式）、
+品質調整指數、時點修正、車站比較（M4），以及淹水（洪水、高潮）與學區的圖層（M3）。
 
 ## 環境準備
 
@@ -31,6 +32,9 @@ uv run tokyo-housing-lab query --city 13202 --adjusted     # 每季中位數，�
 uv run tokyo-housing-lab fetch-stations                    # 成交的最寄駅與車站資料（圖磚 API，第一次約 1 小時）→ data/raw/tiles/
 uv run tokyo-housing-lab analyze buy --by station          # 各車站的典型物件價格排行（要先 fetch-stations、load）
 uv run tokyo-housing-lab analyze trend --by station --line JR中央線   # 一條路線上各站，依站的順序
+uv run tokyo-housing-lab fetch-hazards                     # 洪水、高潮、小學校區、中學校區（圖磚 API，第一次約 1 小時）→ data/raw/tiles/
+uv run tokyo-housing-lab hazards                           # 各區面積中淹水的比例（要先 fetch-hazards、load）
+uv run tokyo-housing-lab hazards --by station --city 13108 # 江東區各車站周邊 500m 的淹水比例、車站所在的學區
 uv run tokyo-housing-lab map     # 產生 data/tokyo_map.html，用瀏覽器打開
 ```
 
@@ -47,6 +51,10 @@ uv run tokyo-housing-lab map     # 產生 data/tokyo_map.html，用瀏覽器打�
 - **顯示**可切換 行政區／**車站**／**路線**（有跑過 `fetch-stations` 才有）：
   - 車站：每站一個圓，大小是 2016 年以來的成交筆數；可拖曳移動、Ctrl＋滾輪或兩指縮放；點圓看這站的走勢、和所在區的比較
   - 路線：選一條路線，地圖上畫出這條線，下方的路線圖依站的順序畫出各站的值與 95% 區間（背景色帶是所在的區）
+- **圖層**可疊上 洪水（想定最大規模）／高潮／小學校區／中學校區（有跑過 `fetch-hazards` 才有）：
+  - 淹水依浸水深上色（「水害ハザードマップ作成の手引き」的 6 級標準色）；行政區模式疊淹水時，區不依價格上色
+  - 學區畫界線，滑鼠移上去看校名；行政區模式下點學區會選取它所在的區
+  - 區的面板多了「區的面積中」淹水的比例；車站的面板多了「車站周邊 500m」的淹水比例和車站所在的學區
 
 ### 綜合指標（取引＋成約）
 
@@ -139,6 +147,36 @@ XIT001 沒有車站欄位。成交點版本的 API（XPT001，圖磚）把每筆
 - 車站資料：「国土数値情報（駅別乗降客数データ）」（国土交通省）を加工して作成
 - 計算方式寫在 `src/tokyo_housing_lab/analysis/stations.py`、`src/tokyo_housing_lab/processing/stations.py`
 
+### 淹水、學區（圖層）
+
+| 圖層 | API | 縮放 | 內容 |
+|---|---|---|---|
+| 洪水 | XKT026 洪水浸水想定区域（想定最大規模） | z14〜15 | 各河川的浸水想定區域，`A31a_205` 浸水深ランク |
+| 高潮 | XKT027 高潮浸水想定区域 | z13〜 | 浸水深是文字分級（「0.3m以上0.5m未満」） |
+| 小學校區 | XKT004 小学校区（令和 5 年度） | z11〜 | 一校一個通學區域 |
+| 中學校區 | XKT005 中学校区（令和 5 年度） | z11〜 | 同上 |
+
+- `fetch-hazards`：和東京都本島 53 個市區町村相交的圖磚（洪水 552、高潮 156、學區各 17 個），原始回應 gzip 存到 `data/raw/tiles/`（約 150MB）。
+  已有的跳過；官方一年更新一次，要更新時用 `--force`。`--only flood surge` 可以只抓一部分
+- 浸水深ランク依國土數值情報的官方代碼表（`water_depth_code.xlsx`）：1＝0〜0.5m未満、2＝0.5〜3.0m、3＝3.0〜5.0m、4＝5.0〜10.0m、5＝10.0〜20.0m、6＝20.0m以上
+- `load` 時：
+  - 洪水、高潮畫到 Web Mercator 縮放 20 的格網（東京約 31m 一格），每格取最大的浸水深等級（同一個地點常有好幾條河川的想定重疊），
+    只留都內（地圖的行政區界）→ `hazard_grid`（每列的連續區段）
+  - 學區的多邊形會超出圖磚約 40m，切齊圖磚的邊界後依學校代碼拼成一筆 → `school_district`（邊界線另外存，去掉圖磚邊界上的邊）
+  - 幾何運算（掃描線填色、點在多邊形內、切邊、簡化）用 numpy 自己寫：`src/tokyo_housing_lab/processing/raster.py`
+- `hazards`：浸水深 ≥0.5m（淹到地板以上）、≥3m（淹到 2 樓）的比例。區＝區的面積中；車站＝車站座標半徑 500m 內
+  （都界附近的車站只算都內的部分，不到一半的不算）。計算方式在 `src/tokyo_housing_lab/analysis/hazards.py`
+- 檢查：淹水比例最高的是荒川、足立、墨田、葛飾、江戶川區（洪水 ≥0.5m 77〜93%）；高潮的浸水面積 187km²，和東京都公布的想定（約 212km²）同一個量級
+- 和價格並列看（只當參考）：同一區內，周邊洪水 ≥0.5m 的比例 100% 的車站，比 0% 的便宜約 12%（相關 −0.21）。
+  但低地和高台的差別不只是淹水（街區的性質、新開發的埋立地…），這不是「淹水讓房價打幾折」
+- 限制：
+  - 成交只知道最寄駅，所以是**車站周邊**的指標，不是每筆物件的
+  - 洪水是想定最大規模（千年一次程度），不含內水氾濫；行政區界是簡化版，邊界附近有約 100m 的誤差
+  - 學區：品川區、荒川區國土數值情報沒有資料；可能和現在的指定不同；很多區的中學有學校選擇制。學區資料的利用條件依市區町村而不同，
+    東京都本島（品川、荒川以外）都是「オープンデータ公開・特記條件なし」
+- 資料：「国土数値情報（洪水浸水想定区域データ）」「国土数値情報（高潮浸水想定区域データ）」「国土数値情報（小学校区データ）」
+  「国土数値情報（中学校区データ）」（国土交通省）を加工して作成
+
 邊界資料 `src/tokyo_housing_lab/map/tokyo_municipalities.geojson` 由 `scripts/prepare_boundaries.py` 產生：
 「国土数値情報（行政区域データ）」（国土交通省）を加工して作成（スマートニュース メディア研究所 japan-topography の簡略化データを使用）。
 
@@ -163,6 +201,8 @@ uv run python -c "import duckdb; print(duckdb.connect('data/tokyo_housing_lab.du
 資料表：
 - `transactions`：中古マンション等的成交資料。數值欄位都有 `<欄位>_raw`（原字串）、`<欄位>`（數值）、`<欄位>_status`（ok / empty / sentinel / unparsable）
 - `fetch_log`：每次打 API 的紀錄（含 404 的「該期無資料」）
+- `station`、`station_line`、`transaction_station`：車站（見上面）
+- `hazard_grid`、`school_district`：淹水格網、學區（見上面）
 
 欄位的實際觀察與清理規則的依據：`docs/xit001_fields.md`
 

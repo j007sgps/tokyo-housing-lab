@@ -236,3 +236,74 @@ def test_render_html_with_stations(station_analyses):
     assert set(p["data"]["stations"]["list"]) == {"A", "B"}
     assert "駅別乗降客数" in p["data"]["text"]["stationCredit"]
     assert payload_of(render_html(a, GENERATED))["data"]["stations"] is None
+
+
+# --- 淹水、學區圖層 ---
+
+
+@pytest.fixture(scope="module")
+def hazard_analysis(tmp_path_factory):
+    from test_hazards import build_hazard_db
+
+    from tokyo_housing_lab.analysis.hazards import build_hazards
+
+    with DuckDBStore(build_hazard_db(tmp_path_factory.mktemp("hz"))) as s:
+        return build_hazards(s)
+
+
+def png_pixels(png):
+    import struct
+    import zlib
+
+    w, h = struct.unpack(">II", png[16:24])
+    i = png.index(b"IDAT")
+    size = struct.unpack(">I", png[i - 4 : i])[0]
+    raw = zlib.decompress(png[i + 4 : i + 4 + size])
+    return [list(raw[r * (w + 1) + 1 : (r + 1) * (w + 1)]) for r in range(h)]
+
+
+def test_depth_png_uses_standard_classes():
+    import numpy as np
+
+    flood = build.depth_png("flood", np.array([[0, 1, 2, 3, 4, 5, 6]], dtype=np.uint8))
+    assert png_pixels(flood) == [[0, 1, 2, 3, 4, 5, 6]]
+    # 高潮的 8 級併進同一套 6 色：0.3m未満、0.3〜0.5m → 0.5m未満；0.5〜1m、1〜3m → 0.5〜3m …
+    surge = build.depth_png("surge", np.array([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=np.uint8))
+    assert png_pixels(surge) == [[1, 1, 2, 2, 3, 4, 5, 6]]
+
+
+def test_encode_line_roundtrip():
+    import numpy as np
+
+    pts = np.array([[139.70001, 35.68002], [139.70001, 35.68002], [139.70105, 35.67990]])
+    enc = build.encode_line(pts)
+    assert enc == [13970001, 3568002, 104, -12]  # 重複的點去掉
+    x = y = 0
+    out = []
+    for i in range(0, len(enc), 2):
+        x, y = x + enc[i], y + enc[i + 1]
+        out.append([x / 1e5, y / 1e5])
+    assert out == [[139.70001, 35.68002], [139.70105, 35.6799]]
+
+
+def test_layer_map_data(analysis, hazard_analysis):
+    lay = build_map_data(analysis, GENERATED, layers=hazard_analysis)["layers"]
+    west, south, east, north = lay["bounds"]
+    assert west < 139.0 and east > 139.9 and south < 35.51 and north > 35.89
+    assert lay["thresholds"] == [0.5, 3.0] and lay["radius"] == 500
+    assert lay["depthClasses"][0]["label"] == "0.5m未満" and len(lay["depthClasses"]) == 6
+    assert all(v.startswith("data:image/png;base64,") for v in lay["images"].values())
+    assert lay["cities"]["13108"]["flood"][0] > 0 and lay["cities"]["13108"]["schools"] == {"elementary": 1, "junior": 0}
+    assert set(lay["stations"]) == {"K", "S"}  # 都外的川口沒有資料
+    assert lay["stations"]["K"] == {"flood": [1.0, 1.0], "surge": [1.0, 0.0], "elementary": ["水神小学校"], "junior": []}
+    (school,) = lay["schools"]["elementary"]
+    assert school["name"] == "水神小学校" and school["city"] == "13108"
+    assert len(school["outlines"]) == 1 and len(school["polygons"]) == 1
+    assert "小学校区" in lay["credits"]["elementary"] and "洪水浸水想定区域" in lay["credits"]["flood"]
+    assert build_map_data(analysis, GENERATED)["layers"] is None
+
+
+def test_render_html_with_layers(analysis, hazard_analysis):
+    html = render_html(analysis, GENERATED, layers=hazard_analysis)
+    assert payload_of(html)["data"]["layers"]["schools"]["junior"] == []
+    assert 'id="layer-select"' in html

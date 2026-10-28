@@ -1,14 +1,21 @@
 """把各層串起來：原始檔 →（讀取層）SourceRecord →（處理層）篩選、清理 →（儲存）DuckDB。"""
 
+import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
+
+from tokyo_housing_lab.processing import layers as ly
 from tokyo_housing_lab.processing import stations as st
 from tokyo_housing_lab.processing.clean import clean_record
 from tokyo_housing_lab.processing.filter import is_used_condo
+from tokyo_housing_lab.processing.raster import rle_encode
 from tokyo_housing_lab.sources.raw_store import FETCH_LOG_NAME, read_raw_bytes
+from tokyo_housing_lab.sources.reinfolib_hazards import parse_flood, parse_school, parse_surge
 from tokyo_housing_lab.sources.reinfolib_points import parse_xkt015, parse_xpt001
 from tokyo_housing_lab.sources.reinfolib_records import query_from_filename, read_raw_file
 from tokyo_housing_lab.storage.duckdb_store import DuckDBStore
@@ -130,3 +137,61 @@ def load_station_tiles(raw_dir: Path, store: DuckDBStore, region: str = "13") ->
     return StationLoadSummary(
         len(station_files) + len(point_files), len(stations), len(unknown), len(points), matched, candidates
     )
+
+
+@dataclass(frozen=True)
+class LayerLoadSummary:
+    tiles: dict[str, int]  # 圖層 → 圖磚檔數
+    cells: dict[str, int]  # 淹水：有浸水深的格子數（東京都本島內）
+    schools: dict[str, int]  # 學區：學校數
+
+
+_TILE_NAME = re.compile(r"_z(\d+)_(\d+)_(\d+)\.json\.gz$")
+_LAYER_FILES = {"flood": "xkt026", "surge": "xkt027", "elementary": "xkt004", "junior": "xkt005"}
+
+
+def _rounded(points: np.ndarray) -> list:
+    return np.round(points, 6).tolist()
+
+
+def load_layer_tiles(raw_dir: Path, store: DuckDBStore) -> LayerLoadSummary | None:
+    """data/raw/tiles/ 的圖層 → hazard_grid、school_district。沒有任何圖層的檔案就什麼都不做。"""
+    from tokyo_housing_lab.sources.reinfolib_tiles import TILE_DIR
+
+    tile_dir = raw_dir / TILE_DIR
+    paths = {kind: sorted(tile_dir.glob(f"{prefix}_*.json.gz")) for kind, prefix in _LAYER_FILES.items()}
+    paths = {kind: p for kind, p in paths.items() if p}
+    if not paths:
+        return None
+    tg = ly.tokyo_grid()
+    grid_rows, school_rows, cells, schools = [], [], {}, {}
+    for kind in ("flood", "surge"):
+        if kind not in paths:
+            continue
+        parse = parse_flood if kind == "flood" else parse_surge
+        grid = ly.hazard_grid(tg, (parse(read_raw_bytes(path)) for path in paths[kind]))
+        cells[kind] = int((grid > 0).sum())
+        grid_rows += [
+            {"kind": kind, "y": r + tg.grid.y0, "x0": a + tg.grid.x0, "x1": b + tg.grid.x0, "level": v}
+            for r, a, b, v in rle_encode(grid)
+        ]
+        logger.info("%s：%d 個圖磚 → %d 格", kind, len(paths[kind]), cells[kind])
+    for kind, api in (("elementary", "XKT004"), ("junior", "XKT005")):
+        if kind not in paths:
+            continue
+        pieces = []
+        for path in paths[kind]:
+            z, x, y = map(int, _TILE_NAME.search(path.name).groups())
+            pieces += parse_school(read_raw_bytes(path), api, x, y, z)
+        merged = ly.merge_schools(pieces)
+        schools[kind] = len(merged)
+        school_rows += [
+            {
+                "kind": kind, "code": s.code, "name": s.name, "city": s.city, "owner": s.owner, "address": s.address,
+                "polygons": json.dumps([[_rounded(r) for r in poly] for poly in s.polygons], separators=(",", ":")),
+                "outlines": json.dumps([_rounded(line) for line in s.outlines], separators=(",", ":")),
+            }
+            for s in merged
+        ]  # fmt: skip
+    store.replace_layers(list(paths), grid_rows, school_rows)
+    return LayerLoadSummary({k: len(v) for k, v in paths.items()}, cells, schools)

@@ -3,8 +3,10 @@
 - XPT001 不動産価格（取引価格・成約価格）情報のポイント：每筆成交是一個點，點的位置是「最寄駅」
   （實測：立川附近 266 筆只有 6 種座標，各自離某個車站 3〜52m）。XIT001 沒有車站欄位，靠這個知道最寄駅。
 - XKT015 駅別乗降客数（國土數值情報 S12）：車站（每條路線一段月台線段）、站名、路線、乘降人數。
+- 圖層（HAZARD_LAYERS）：XKT026 洪水浸水想定区域（想定最大規模，只接受 z14〜15）、XKT027 高潮浸水想定区域（z13〜）、
+  XKT004 小学校区、XKT005 中学校区（z11〜）。多邊形會被切在圖磚邊界（多出約 40m 的重疊）。
 
-z = 11 是 API 允許的最小縮放（z = 10 回 400）。一個 z = 11 圖磚一年約 1.4 萬筆、20MB，所以一年一個請求。
+z = 11 是 XPT001 允許的最小縮放（z = 10 回 400）。一個 z = 11 圖磚一年約 1.4 萬筆、20MB，所以一年一個請求。
 原始回應原樣 gzip 存到 data/raw/tiles/。
 """
 
@@ -26,6 +28,13 @@ ZOOM = 11
 TOKYO_BBOX = (138.89, 35.45, 139.97, 35.95)  # 西、南、東、北
 LAND_TYPE_CONDO = "07"  # 中古マンション等
 TILE_DIR = "tiles"
+# 圖層 → (API, 縮放)：各 API 允許的最小縮放（實測，更小的回 400）
+HAZARD_LAYERS = {
+    "flood": ("XKT026", 14),
+    "surge": ("XKT027", 13),
+    "elementary": ("XKT004", 11),
+    "junior": ("XKT005", 11),
+}
 
 
 def tile_of(lon: float, lat: float, z: int = ZOOM) -> tuple[int, int]:
@@ -44,7 +53,7 @@ def tiles_covering(bbox: tuple[float, float, float, float] = TOKYO_BBOX, z: int 
 
 @dataclass(frozen=True)
 class TileQuery:
-    api: Literal["XPT001", "XKT015"]
+    api: Literal["XPT001", "XKT015", "XKT026", "XKT027", "XKT004", "XKT005"]
     x: int
     y: int
     year: int | None = None  # XPT001 才有：一年（第 1〜4 季）
@@ -56,7 +65,7 @@ class TileQuery:
 
     @property
     def filename(self) -> str:
-        # 例：xpt001_z11_1818_806_2024.json.gz、xkt015_z11_1818_806.json.gz
+        # 例：xpt001_z11_1818_806_2024.json.gz、xkt015_z11_1818_806.json.gz、xkt026_z14_14552_6451.json.gz
         stem = f"{self.api.lower()}_z{self.z}_{self.x}_{self.y}"
         return f"{stem}_{self.year}.json.gz" if self.year else f"{stem}.json.gz"
 
@@ -98,11 +107,44 @@ def fetch_station_tiles(
         if path.is_file() and not force and query.year not in refresh:
             counts["skipped"] += 1
             continue
-        status, body = client.get(API_ROOT + query.api, query.params(), query.label)
-        if body is None:
-            counts["no_data"] += 1
-        else:
-            _save(path, body)
-            counts["saved"] += 1
-        logger.info("（%d／%d）%s -> %s", i, len(queries), query.label, status)
+        _fetch_one(client, path, query, counts, f"（{i}／{len(queries)}）")
+    return counts
+
+
+def _fetch_one(client: ReinfolibClient, path: Path, query: TileQuery, counts: dict[str, int], progress: str) -> None:
+    status, body = client.get(API_ROOT + query.api, query.params(), query.label)
+    if body is None:
+        counts["no_data"] += 1
+    else:
+        _save(path, body)
+        counts["saved"] += 1
+    logger.info("%s%s -> %s", progress, query.label, status)
+
+
+def hazard_queries(layers: list[str] | None = None) -> list[TileQuery]:
+    """和東京都本島的市區町村相交的圖磚（用地圖的行政區界判斷）。"""
+    from tokyo_housing_lab.processing.raster import project_polygon, tiles_intersecting
+    from tokyo_housing_lab.processing.regions import municipality_polygons
+
+    queries = []
+    for layer in layers or list(HAZARD_LAYERS):
+        api, z = HAZARD_LAYERS[layer]
+        polygons = [project_polygon(p, z) for _, p in municipality_polygons()]
+        queries += [TileQuery(api, x, y, z=z) for x, y in tiles_intersecting(polygons, z)]  # type: ignore[arg-type]
+    return queries
+
+
+def fetch_hazard_tiles(
+    client: ReinfolibClient, raw_dir: Path, layers: list[str] | None = None, force: bool = False
+) -> dict[str, int]:
+    """圖層的圖磚。已存在的跳過（官方一年更新一次，要更新時用 force）。空的圖磚是 200 ＋空陣列，照樣存檔。"""
+    root = raw_dir / TILE_DIR
+    queries = hazard_queries(layers)
+    counts = {"saved": 0, "skipped": 0, "no_data": 0}
+    for i, query in enumerate(queries, 1):
+        path = root / query.filename
+        if path.is_file() and not force:
+            counts["skipped"] += 1
+            continue
+        _fetch_one(client, path, query, counts, f"（{i}／{len(queries)}）")
     return counts

@@ -4,6 +4,7 @@
 計算邏輯只有 analysis/trend.py 一份。
 """
 
+import base64
 import json
 import math
 from datetime import date
@@ -11,9 +12,15 @@ from importlib.resources import files
 from itertools import combinations
 from typing import Any
 
+import numpy as np
+
 from tokyo_housing_lab import DISCLAIMER
+from tokyo_housing_lab.analysis.hazards import STATION_RADIUS_M, THRESHOLDS, HazardAnalysis
 from tokyo_housing_lab.analysis.municipalities import COMBINED, HEDONIC, INVEST_PRICE_CLASSIFICATION, Analysis
 from tokyo_housing_lab.analysis.stations import StationAnalysis, line_label, operator_label
+from tokyo_housing_lab.processing.png import palette_png
+from tokyo_housing_lab.processing.raster import simplify
+from tokyo_housing_lab.sources.reinfolib_hazards import FLOOD_DEPTHS, SURGE_DEPTHS
 from tokyo_housing_lab.analysis.trend import (
     INVEST_MAX_CI_WIDTH,
     growth_between,
@@ -33,6 +40,23 @@ BOUNDARY_CREDIT = (
     "（スマートニュース メディア研究所 japan-topography の簡略化データを使用）"
 )
 STATION_CREDIT = "「国土数値情報（駅別乗降客数データ）」（国土交通省）（https://nlftp.mlit.go.jp/ksj/）を加工して作成"
+LAYER_CREDITS = {
+    "flood": "「国土数値情報（洪水浸水想定区域データ）」（国土交通省）（https://nlftp.mlit.go.jp/ksj/）を加工して作成",
+    "surge": "「国土数値情報（高潮浸水想定区域データ）」（国土交通省）（https://nlftp.mlit.go.jp/ksj/）を加工して作成",
+    "elementary": "「国土数値情報（小学校区データ）」（国土交通省）（https://nlftp.mlit.go.jp/ksj/）を加工して作成",
+    "junior": "「国土数値情報（中学校区データ）」（国土交通省）（https://nlftp.mlit.go.jp/ksj/）を加工して作成",
+}
+# 浸水深的顏色：「水害ハザードマップ作成の手引き」的標準色（下限 → 顏色）。高潮的細分級併進同一套
+DEPTH_CLASSES = [
+    (0.0, "0.5m未満", (247, 245, 169)),
+    (0.5, "0.5〜3m", (255, 216, 192)),
+    (3.0, "3〜5m", (255, 183, 183)),
+    (5.0, "5〜10m", (255, 145, 145)),
+    (10.0, "10〜20m", (242, 133, 201)),
+    (20.0, "20m以上", (220, 122, 220)),
+]
+DEPTH_ALPHA = 200
+SCHOOL_TOLERANCE_DEG = 1.5e-4  # 學區的簡化（約 15m）：地圖上看不出差別，檔案小很多
 NOT_ADVICE = "只是過去成交資料的整理，不是價格預測，也不是投資建議。"
 LINE_MIN_STATIONS = 3  # 路線圖：至少幾站有成交，才放進選單
 LINE_GROUP_ORDER = ["JR", "東京メトロ", "都営"]  # 路線選單的分組順序；其他公司依名稱
@@ -138,7 +162,9 @@ def build_station_data(sa: StationAnalysis) -> dict[str, Any]:
     }
 
 
-def build_map_data(analysis: Analysis, generated: date, stations: StationAnalysis | None = None) -> dict[str, Any]:
+def build_map_data(
+    analysis: Analysis, generated: date, stations: StationAnalysis | None = None, layers: HazardAnalysis | None = None
+) -> dict[str, Any]:
     """地圖要的全部數字。漲幅只放「兩年都達到樣本門檻」的組合，沒放的就是樣本不足。
 
     價格種類除了 "01"／"02"，還有 "combined"（綜合：取引＋換算成取引水準的成約，以取引為主軸）
@@ -239,6 +265,65 @@ def build_map_data(analysis: Analysis, generated: date, stations: StationAnalysi
         },
         "municipalities": municipalities,
         "stations": None if stations is None else build_station_data(stations),
+        "layers": None if layers is None else build_layer_data(layers),
+    }
+
+
+def _depth_class(lower: float) -> int:
+    """浸水深的下限 → DEPTH_CLASSES 的編號（1 起算）。"""
+    return max(i for i, (low, _, _) in enumerate(DEPTH_CLASSES, 1) if lower >= low)
+
+
+def depth_png(kind: str, levels: np.ndarray) -> bytes:
+    depths = FLOOD_DEPTHS if kind == "flood" else dict(enumerate(SURGE_DEPTHS, 1))
+    lut = np.zeros(256, dtype=np.uint8)
+    for level, (low, _) in depths.items():
+        lut[level] = _depth_class(low)
+    palette = [(0, 0, 0, 0)] + [(*rgb, DEPTH_ALPHA) for _, _, rgb in DEPTH_CLASSES]
+    return palette_png(lut[levels], palette)
+
+
+def encode_line(points: np.ndarray) -> list[int]:
+    """經緯度 → 1e-5 度的整數，第一點是絕對值、之後是和前一點的差（JSON 小很多）。重複的點去掉。"""
+    q = np.round(np.asarray(points) * 1e5).astype(np.int64)
+    d = np.vstack([q[:1], np.diff(q, axis=0)])
+    keep = np.r_[True, np.any(d[1:] != 0, axis=1)]
+    return d[keep].ravel().tolist()
+
+
+def build_layer_data(hz: HazardAnalysis) -> dict[str, Any]:
+    g = hz.grids.tg.grid
+    west, south, east, north = g.bounds_lonlat()
+    low, high = THRESHOLDS
+
+    def shares(sh) -> dict[str, list]:
+        return {k: [_r(sh[k, low], 3), _r(sh[k, high], 3)] for k in ("flood", "surge")}
+
+    schools: dict[str, list] = {"elementary": [], "junior": []}
+    for r in hz.schools:
+        schools[r["kind"]].append({
+            "name": r["name"], "city": r["city"], "address": r["address"],
+            "outlines": [encode_line(simplify(np.array(line), SCHOOL_TOLERANCE_DEG)) for line in json.loads(r["outlines"])],
+            "polygons": [[encode_line(simplify(np.array(ring), SCHOOL_TOLERANCE_DEG)) for ring in poly]
+                         for poly in json.loads(r["polygons"])],  # 滑鼠移上去用（切在圖磚邊界的各塊）
+        })  # fmt: skip
+    return {
+        "bounds": [west, south, east, north],
+        "thresholds": [low, high],
+        "radius": STATION_RADIUS_M,
+        "depthClasses": [{"label": label, "color": "#" + bytes(rgb).hex()} for _, label, rgb in DEPTH_CLASSES],
+        "images": {
+            kind: "data:image/png;base64," + base64.b64encode(depth_png(kind, hz.grids.levels[kind])).decode()
+            for kind in ("flood", "surge")
+        },
+        "cities": {c.city: {**shares(c.shares), "schools": c.schools} for c in hz.cities},
+        "stations": {
+            s.station_id: {**shares(s.shares), "elementary": s.schools.get("elementary", []), "junior": s.schools.get("junior", [])}
+            for s in hz.stations
+            if s.shares is not None
+        },
+        "schools": schools,
+        "credits": LAYER_CREDITS,
     }
 
 
@@ -258,13 +343,19 @@ _STANDALONE_HEAD = (
 )
 
 
-def render_html(analysis: Analysis, generated: date, standalone: bool = True, stations: StationAnalysis | None = None) -> str:
+def render_html(
+    analysis: Analysis,
+    generated: date,
+    standalone: bool = True,
+    stations: StationAnalysis | None = None,
+    layers: HazardAnalysis | None = None,
+) -> str:
     """standalone=True：完整的 HTML 文件，瀏覽器直接打開。
     False：只有內容片段（給會自己包上 <html>／<head> 的地方用，例如 claude.ai 的 Artifact）。
     """
     template = files("tokyo_housing_lab.map").joinpath("template.html").read_text(encoding="utf-8")
     if template.count(DATA_PLACEHOLDER) != 1:
         raise RuntimeError("template.html 裡的資料佔位字串必須剛好一個")
-    payload = {"data": build_map_data(analysis, generated, stations), "boundaries": _boundaries()}
+    payload = {"data": build_map_data(analysis, generated, stations, layers), "boundaries": _boundaries()}
     html = template.replace(DATA_PLACEHOLDER, _embed(payload))
     return _STANDALONE_HEAD + html + "\n</body>\n</html>\n" if standalone else html

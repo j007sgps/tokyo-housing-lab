@@ -2,11 +2,13 @@
 
   fetch：打 API，原始檔存到 data/raw/（預設東京都全域 2005Q3〜；已存在的跳過，最新 4 季重抓）
   fetch-stations：圖磚型 API（成交的最寄駅、車站資料），原始檔存到 data/raw/tiles/
+  fetch-hazards：圖磚型 API（洪水、高潮、小學校區、中學校區），原始檔存到 data/raw/tiles/
   load ：只讀 data/raw/，清理後寫進 DuckDB（不打 API）
   query：每季 ㎡ 單價中位數與筆數（只讀 DuckDB）
   analyze：各市區町村的排行（購買／趨勢／投資模式，只讀 DuckDB）
   hedonic：品質調整指數的模型診斷（係數、配適度、驗證；只讀 DuckDB）
   adjust：時點修正係數（舊成交 → 最新 4 季的水準），寫進 DuckDB 的 time_adjustment 表
+  hazards：各區、各車站周邊的淹水比例（洪水、高潮）與車站所在的學區（只讀 DuckDB）
   map  ：產生地圖 HTML（只讀 DuckDB）
 """
 
@@ -23,12 +25,19 @@ import numpy as np
 
 from tokyo_housing_lab import DISCLAIMER
 from tokyo_housing_lab.analysis import hedonic as hd
+from tokyo_housing_lab.analysis.hazards import STATION_RADIUS_M, THRESHOLDS, build_hazards
 from tokyo_housing_lab.analysis.municipalities import COMBINED, HEDONIC, INVEST_PRICE_CLASSIFICATION, build_analysis
 from tokyo_housing_lab.analysis.stations import StationAnalysis, build_station_analysis, line_label
 from tokyo_housing_lab.analysis.time_adjust import basis_counts, compute_time_adjustments
 from tokyo_housing_lab.analysis.trend import MIN_N
 from tokyo_housing_lab.config import MissingApiKeyError, load_api_key
-from tokyo_housing_lab.pipeline import DEFAULT_DB_PATH, DEFAULT_RAW_DIR, load_raw_dir, load_station_tiles
+from tokyo_housing_lab.pipeline import (
+    DEFAULT_DB_PATH,
+    DEFAULT_RAW_DIR,
+    load_layer_tiles,
+    load_raw_dir,
+    load_station_tiles,
+)
 from tokyo_housing_lab.sources.raw_store import RawStore
 from tokyo_housing_lab.sources.reinfolib_api import (
     REFRESH_RECENT_QUARTERS,
@@ -37,7 +46,7 @@ from tokyo_housing_lab.sources.reinfolib_api import (
     fetch_range,
 )
 from tokyo_housing_lab.sources.reinfolib_records import RawFileError
-from tokyo_housing_lab.sources.reinfolib_tiles import fetch_station_tiles
+from tokyo_housing_lab.sources.reinfolib_tiles import HAZARD_LAYERS, fetch_hazard_tiles, fetch_station_tiles
 from tokyo_housing_lab.storage.duckdb_store import DuckDBStore
 
 TACHIKAWA = "13202"
@@ -60,6 +69,13 @@ def _fetch_stations(args: argparse.Namespace) -> None:
     # z = 11 的圖磚一年約 20MB，回應可能要 20 秒以上
     with _make_client(timeout=180.0) as client:
         counts = fetch_station_tiles(client, args.raw_dir, args.start, date.today(), force=args.force)
+    print(f"抓取完成：新存檔 {counts['saved']}、無資料(404) {counts['no_data']}、已有跳過 {counts['skipped']}")
+
+
+def _fetch_hazards(args: argparse.Namespace) -> None:
+    # 洪水 z14 的圖磚在低地一個可以到 10MB 以上
+    with _make_client(timeout=180.0) as client:
+        counts = fetch_hazard_tiles(client, args.raw_dir, args.only, force=args.force)
     print(f"抓取完成：新存檔 {counts['saved']}、無資料(404) {counts['no_data']}、已有跳過 {counts['skipped']}")
 
 
@@ -95,9 +111,17 @@ def _load(args: argparse.Namespace) -> None:
             f"車站：{stations.tiles} 個圖磚檔 → 車站 {stations.stations} 站（另有名稱不明 {stations.unknown_stations} 處）、"
             f"成交點 {stations.points} 筆 → 對上成交 {stations.matched} 筆（同期間的 {rate:.1%}）"
         )
+    with DuckDBStore(args.db) as store:
+        layers = load_layer_tiles(args.raw_dir, store)
+    if layers:
+        parts = [f"{LAYER_LABELS[k]} {n} 個圖磚" for k, n in layers.tiles.items()]
+        parts += [f"{LAYER_LABELS[k]}的浸水格 {n:,}" for k, n in layers.cells.items()]
+        parts += [f"{LAYER_LABELS[k]} {n} 校" for k, n in layers.schools.items()]
+        print("圖層：" + "、".join(parts))
 
 
 PRICE_LABELS = {"01": "取引", "02": "成約"}
+LAYER_LABELS = {"flood": "洪水", "surge": "高潮", "elementary": "小學校區", "junior": "中學校區"}
 
 
 def _query(args: argparse.Namespace) -> None:
@@ -403,11 +427,53 @@ def _map(args: argparse.Namespace) -> None:
         except ValueError as e:  # 沒有車站資料：只畫行政區
             print(f"（不畫車站：{e}）")
             stations = None
-    html = render_html(a, date.today(), standalone=not args.fragment, stations=stations)
+        try:
+            layers = build_hazards(store)
+        except ValueError as e:  # 沒有圖層資料
+            print(f"（不畫淹水、學區圖層：{e}）")
+            layers = None
+    html = render_html(a, date.today(), standalone=not args.fragment, stations=stations, layers=layers)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(html, encoding="utf-8")
     n_st = "" if stations is None else f"、{sum(1 for r in stations.stations.values() if r.cities)} 個車站"
     print(f"地圖已產生：{args.out}（{len(html.encode()) // 1024} KB，{len(a.municipalities)} 個市區町村{n_st}）。用瀏覽器打開即可。")
+
+
+def _hazards(args: argparse.Namespace) -> None:
+    if not args.db.is_file():
+        raise FileNotFoundError(f"找不到資料庫 {args.db}，請先執行 load")
+    with DuckDBStore(args.db) as store:
+        hz = build_hazards(store)
+    cities, stations = hz.cities, hz.stations
+    names = {c.city: c.name for c in cities}
+    low, high = THRESHOLDS
+
+    def rank(shares) -> tuple[float, float]:  # 0.5m 以上的比例，同分再看 3m 以上
+        return -shares[args.sort, low], -shares[args.sort, high]
+
+    cols = f"洪水 ≥{low:g}m／≥{high:g}m　高潮 ≥{low:g}m／≥{high:g}m"
+
+    def pct(shares) -> str:
+        return "　".join(f"{shares[k, low]:>5.0%}／{shares[k, high]:>4.0%}" for k in ("flood", "surge"))
+
+    if args.by == "city":
+        print(f"各市區町村：面積中浸水深達到門檻的比例（{cols}）")
+        for c in sorted(cities, key=lambda c: rank(c.shares)):
+            school = "" if c.schools["elementary"] else "  ※ 沒有學區資料"
+            print(f"  {c.name:<8}{pct(c.shares)}  {c.area_km2:6.1f}km²{school}")
+    else:
+        rows = [s for s in stations if s.shares is not None and (args.city is None or s.city == args.city)]
+        if args.city is not None and not rows:
+            raise ValueError(f"找不到 {args.city} 的車站（市區町村代碼，例：13108）")
+        where = names[args.city] if args.city else "東京都本島"
+        print(f"{where}的車站：半徑 {STATION_RADIUS_M:g}m 內浸水深達到門檻的比例（{cols}）、車站所在的學區")
+        for s in sorted(rows, key=lambda s: rank(s.shares)):
+            school = "、".join(s.schools["elementary"] + s.schools["junior"]) or "（沒有學區資料）"
+            print(f"  {s.name:<10}{names.get(s.city, ''):<6}{pct(s.shares)}  {school}")
+        print("※ 成交只知道最寄駅，這是車站周邊的指標，不是每筆物件的；學區是車站座標所在的學區")
+    print("※ 洪水是想定最大規模（不含內水氾濫）；學區是國土數值情報令和5年度（品川區、荒川區沒有資料）")
+    print()
+    print(DISCLAIMER)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -438,6 +504,18 @@ def build_parser() -> argparse.ArgumentParser:
     fst.add_argument("--force", action="store_true", help="已有原始檔的也全部重抓（預設只重抓今年和去年）")
     fst.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
     fst.set_defaults(handler=_fetch_stations)
+
+    fhz = sub.add_parser(
+        "fetch-hazards",
+        help="洪水（XKT026）、高潮（XKT027）、小學校區（XKT004）、中學校區（XKT005）→ data/raw/tiles/",
+        epilog=DISCLAIMER,
+    )
+    fhz.add_argument(
+        "--only", nargs="+", choices=list(HAZARD_LAYERS), help="只抓這些圖層（預設全部；洪水約 550 個圖磚、要 30 分鐘以上）"
+    )
+    fhz.add_argument("--force", action="store_true", help="已有原始檔的也全部重抓（官方一年更新一次）")
+    fhz.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
+    fhz.set_defaults(handler=_fetch_hazards)
 
     load = sub.add_parser("load", help="data/raw/ → 清理 → DuckDB（不打 API）", epilog=DISCLAIMER)
     load.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
@@ -479,6 +557,13 @@ def build_parser() -> argparse.ArgumentParser:
     adj.add_argument("--region", default=TOKYO)
     adj.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     adj.set_defaults(handler=_adjust)
+
+    hz = sub.add_parser("hazards", help="各區、各車站周邊的淹水比例（洪水、高潮）與學區", epilog=DISCLAIMER)
+    hz.add_argument("--by", choices=["city", "station"], default="city", help="city＝市區町村（預設）、station＝車站")
+    hz.add_argument("--sort", choices=["flood", "surge"], default="flood", help="依哪一種的 0.5m 以上比例排序（預設洪水）")
+    hz.add_argument("--city", help="--by station 時只看這個市區町村（代碼，例：13108 江東區）")
+    hz.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    hz.set_defaults(handler=_hazards)
 
     map_ = sub.add_parser("map", help="產生地圖 HTML（趨勢／購買／投資模式）", epilog=DISCLAIMER)
     map_.add_argument("--out", type=Path, default=DEFAULT_MAP_PATH, help=f"輸出位置（預設 {DEFAULT_MAP_PATH}）")

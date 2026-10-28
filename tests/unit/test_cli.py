@@ -362,3 +362,41 @@ def test_map_with_stations(station_db, tmp_path, capsys):
     assert cli.main(["map", "--db", str(station_db), "--out", str(out_file)]) == 0
     assert "2 個車站" in capsys.readouterr().out
     assert '"stations":{"years":[2016' in out_file.read_text(encoding="utf-8")
+
+
+# --- 圖層 ---
+
+
+def test_fetch_hazards_then_load(tmp_path, monkeypatch, capsys):
+    import tokyo_housing_lab.sources.reinfolib_tiles as rt
+    from test_layers import SMALL, collection, polygon_feature, school_props
+
+    from tokyo_housing_lab.sources.reinfolib_tiles import TileQuery, tile_of
+
+    fx, fy = tile_of(139.805, 35.685, 14)
+    sx, sy = tile_of(139.805, 35.685, 11)
+    monkeypatch.setattr(
+        rt, "hazard_queries", lambda layers: [TileQuery("XKT026", fx, fy, z=14), TileQuery("XKT004", sx, sy)]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        api = request.url.path.rsplit("/", 1)[1]
+        if api == "XKT026":
+            return httpx.Response(200, content=collection(polygon_feature({"A31a_205": 2}, SMALL)))
+        return httpx.Response(200, content=collection(polygon_feature(school_props(), SMALL)))
+
+    clock = FakeClock()
+    monkeypatch.setattr(
+        cli,
+        "_make_client",
+        lambda timeout=30.0: ReinfolibClient(
+            ApiKey(FAKE_KEY), transport=httpx.MockTransport(handler), clock=clock, sleep=clock.sleep
+        ),
+    )
+    raw, db = tmp_path / "raw", tmp_path / "t.duckdb"
+    assert cli.main(["fetch-hazards", "--raw-dir", str(raw)]) == 0
+    assert "新存檔 2" in capsys.readouterr().out
+    assert cli.main(["load", "--raw-dir", str(raw), "--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert "圖層：洪水 1 個圖磚、小學校區 1 個圖磚、洪水的浸水格" in out and "小學校區 1 校" in out
+    assert FAKE_KEY not in out

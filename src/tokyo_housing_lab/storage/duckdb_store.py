@@ -132,6 +132,27 @@ STATION_POINT_COLUMNS = [
 ]
 
 
+# 淹水格網（load 時從 data/raw/tiles/ 建）：Web Mercator 縮放 20 的格子（東京約 31m），每列的連續區段
+HAZARD_GRID_COLUMNS = [
+    ("kind", "VARCHAR"),  # flood（洪水，想定最大規模）、surge（高潮）
+    ("y", "INTEGER"),  # 縮放 20 的列（絕對座標）
+    ("x0", "INTEGER"),  # [x0, x1) 的格子都是這個等級
+    ("x1", "INTEGER"),
+    ("level", "SMALLINT"),  # 浸水深的等級（reinfolib_hazards.FLOOD_DEPTHS／SURGE_DEPTHS）
+]
+# 學區：一校一列；幾何是切齊圖磚後拼起來的（JSON：多邊形 → 環 → [經度, 緯度]）
+SCHOOL_DISTRICT_COLUMNS = [
+    ("kind", "VARCHAR"),  # elementary（小學）、junior（中學）
+    ("code", "VARCHAR"),  # 學校代碼
+    ("name", "VARCHAR"),
+    ("city", "VARCHAR"),
+    ("owner", "VARCHAR"),  # 設置者
+    ("address", "VARCHAR"),
+    ("polygons", "VARCHAR"),
+    ("outlines", "VARCHAR"),  # 學區的邊界線（JSON：線 → [經度, 緯度]；圖磚邊界上的邊已去掉）
+]
+
+
 # 成交點 → XIT001 的成交（INSERT 時跳過已經對上的）。keys 的欄位名是 station_point 的
 _MATCH_SQL = """
     INSERT INTO transaction_station
@@ -189,6 +210,8 @@ class DuckDBStore:
             [("raw_file", "VARCHAR"), ("row_index", "INTEGER"), ("station_id", "VARCHAR")],
             ',\n  PRIMARY KEY ("raw_file", "row_index")',
         )
+        self._create("hazard_grid", HAZARD_GRID_COLUMNS)
+        self._create("school_district", SCHOOL_DISTRICT_COLUMNS, ',\n  PRIMARY KEY ("kind", "code")')
 
     def _create(self, table: str, columns: list[tuple[str, str]], extra: str = "") -> None:
         """表格不存在就建立；欄位和程式不一致（舊版本建的）就砍掉重建。
@@ -340,6 +363,23 @@ class DuckDBStore:
                 self.con.rollback()
                 raise
         return matched
+
+    def replace_layers(
+        self, kinds: Iterable[str], grid: Iterable[Mapping[str, Any]], schools: Iterable[Mapping[str, Any]]
+    ) -> None:
+        """圖層整批換掉（kinds 是這次有資料的圖層；沒列到的維持原狀）。"""
+        kinds = list(kinds)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.con.begin()
+            try:
+                self.con.execute("DELETE FROM hazard_grid WHERE list_contains(?, kind)", [kinds])
+                self.con.execute("DELETE FROM school_district WHERE list_contains(?, kind)", [kinds])
+                self._insert_ndjson("hazard_grid", HAZARD_GRID_COLUMNS, grid, Path(tmp) / "grid.ndjson")
+                self._insert_ndjson("school_district", SCHOOL_DISTRICT_COLUMNS, schools, Path(tmp) / "school.ndjson")
+                self.con.commit()
+            except BaseException:
+                self.con.rollback()
+                raise
 
     def _insert_ndjson(
         self, table: str, columns: list[tuple[str, str]], rows: Iterable[Mapping[str, Any]], path: Path
