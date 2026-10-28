@@ -29,5 +29,6 @@ def clock() -> FakeClock:
 
 
 @pytest.fixture
-def placeholder_body() -> bytes:
-    return (FIXTURES / "xit001_placeholder.json").read_bytes()
+def sample_body() -> bytes:
+    # 由真實回應（立川市 2024Q1 取引價格）裁切的小樣本；client 測試只把它當 bytes
+    return (FIXTURES / "xit001_13202_2024Q1_p01_sample.json").read_bytes()
