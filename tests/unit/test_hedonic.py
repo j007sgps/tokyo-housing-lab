@@ -23,8 +23,10 @@ from tokyo_housing_lab.analysis.hedonic import (
     predict,
     renovation_group,
     structure_group,
+    time_adjustments,
     validate_holdout,
     window_period,
+    window_subperiod,
     yearly_period,
 )
 from tokyo_housing_lab.analysis.trend import MIN_N
@@ -382,3 +384,129 @@ def test_validate_holdout_beats_district_median():
     assert 0 < v.model_median_error < v.baseline_median_error
     assert v.model_within[0.1] > v.baseline_within[0.1]
     assert v.model_median_error == pytest.approx(math.exp(0.05 * 0.6745) - 1, rel=0.3)  # 常態誤差的 |e| 中位數 ≈ 0.674σ
+
+
+
+# --- 時點修正 ---
+
+# 最新一季 2013Q4 → 期間 0 = 2013Q1〜Q4、−1 = 2012、−2 = 2011、−3 = 2010
+A_TRUE = {"13101": {-3: 0.0, -2: 0.05, -1: 0.10, 0: 0.20}, "13102": {-3: 0.0, -2: -0.02, -1: 0.03, 0: 0.08}}
+SMALL_CITY = "13303"
+
+
+def b_true(w, k):
+    """期間內第 k 季的偏離（第 0 季 = 0）：每期的季內走勢都不一樣。"""
+    return 0.01 * k * (w + 4)
+
+
+def make_quarterly(rng, noise=0.01, per_quarter=40, small=5):
+    cols = {k: [] for k in ("city", "district", "year", "quarter", "price_classification", "log_price", "area",
+                             "building_year", "floor_plan", "structure", "renovation", "city_planning", "floor_area_ratio")}
+    plan = {"13101": ["甲町", "乙町", "丙町"], "13102": ["丁町", "戊町", "己町"], SMALL_CITY: ["氷川"]}
+    trend = A_TRUE | {SMALL_CITY: {-3: 0.0, -2: 0.5, -1: -0.3, 0: 0.9}}  # 小區：亂跳
+    for city, districts in plan.items():
+        for year in range(2010, 2014):
+            for q in (1, 2, 3, 4):
+                w, k = year - 2013, q - 1
+                # 13102 在目標期（2013 年）的筆數多一倍：全東京的係數要依「目標期」的筆數加權
+                n = small if city == SMALL_CITY else per_quarter * (2 if city == "13102" and year == 2013 else 1)
+                for _ in range(n):
+                    d = str(rng.choice(districts))
+                    area = float(rng.choice([20, 30, 45, 55, 65, 80, 100]))
+                    age = int(rng.integers(0, 45))
+                    y = TRUE["district"].get(d, 12.0) + trend[city][w] + b_true(w, k) + true_building(area, age)
+                    y += TRUE["old_seismic"] if year - age <= 1981 else 0.0
+                    y += rng.normal(0, noise)
+                    row = (city, d, year, q, "01", y, area, year - age, "2LDK", "RC", "未改装", "商業地域", 200.0)
+                    for key, v in zip(cols, row, strict=True):
+                        cols[key].append(v)
+    arrays = {k: np.array(v, dtype=object if isinstance(v[0], str) else None) for k, v in cols.items()}
+    return Sample.from_columns(arrays)
+
+
+@pytest.fixture(scope="module")
+def quarterly_model():
+    s = make_quarterly(np.random.default_rng(11))
+    m = fit_hedonic(s, window_period(s, 2013, 4), subperiod=window_subperiod(s, 2013, 4))
+    return s, m
+
+
+ALL_QUARTERS = [(y, q) for y in range(2010, 2014) for q in (1, 2, 3, 4)]
+
+
+def true_log_factor(city, w, k):
+    target = A_TRUE[city][0] + np.mean([b_true(0, j) for j in range(4)])
+    return target - (A_TRUE[city][w] + b_true(w, k))
+
+
+def test_window_subperiod():
+    s = make_quarterly(np.random.default_rng(0), per_quarter=1, small=0)
+    pairs = set(zip(window_period(s, 2013, 4).tolist(), window_subperiod(s, 2013, 4).tolist(), strict=True))
+    assert pairs == {(w, k) for w in range(-3, 1) for k in range(4)}
+    # 以 2014Q1 為終點：2013Q2 是期間 0 的第 0 季、2014Q1 是第 3 季、2013Q1 是期間 −1 的第 3 季
+    sub = s.subset(np.arange(3))
+    sub.year, sub.quarter = np.array([2013, 2014, 2013]), np.array([2, 1, 1])
+    assert window_period(sub, 2014, 1).tolist() == [0, 0, -1]
+    assert window_subperiod(sub, 2014, 1).tolist() == [0, 3, 3]
+
+
+def test_time_adjustment_recovers_city_trend_and_quarters(quarterly_model):
+    _, m = quarterly_model
+    adj = {(a.city, a.year, a.quarter): a for a in time_adjustments(m, ["13101", "13102"], ALL_QUARTERS, 2013, 4)}
+    for city in A_TRUE:
+        for y, q in ALL_QUARTERS:
+            a = adj[(city, y, q)]
+            assert a.basis == "city" and a.n == (320 if city == "13102" and y == 2013 else 160)
+            assert a.log_factor == pytest.approx(true_log_factor(city, y - 2013, q - 1), abs=0.01)
+            assert a.low < a.factor < a.high
+    # 目標期內 4 季的係數平均 = 1（log 平均 = 0）
+    assert sum(adj[("13101", 2013, q)].log_factor for q in (1, 2, 3, 4)) == pytest.approx(0, abs=1e-9)
+
+
+def test_small_or_unknown_city_uses_tokyo(quarterly_model):
+    _, m = quarterly_model
+    adj = {(a.city, a.year, a.quarter): a for a in time_adjustments(m, ["13101", "13102", SMALL_CITY, "13999"], ALL_QUARTERS, 2013, 4)}
+    for city in (SMALL_CITY, "13999"):
+        a = adj[(city, 2010, 2)]
+        assert a.basis == "tokyo"
+        # 全東京 = 兩區依目標期筆數（160：320）加權平均；季內的部分大家一樣
+        expected = (true_log_factor("13101", -3, 1) + 2 * true_log_factor("13102", -3, 1)) / 3
+        assert a.log_factor == pytest.approx(expected, abs=0.01)
+    assert adj[(SMALL_CITY, 2010, 2)].n == 20 and adj[("13999", 2010, 2)].n == 0
+    # 區間：全東京平均的誤差 ＋ 各區圍繞平均的離散（兩區的真實係數差 0.12 左右）→ 比任何一區自己的區間寬
+    t = adj[(SMALL_CITY, 2010, 2)]
+    spread = math.sqrt((1 / 3) * (2 / 3)) * abs(true_log_factor("13101", -3, 1) - true_log_factor("13102", -3, 1))
+    assert t.se == pytest.approx(spread, rel=0.15)
+    assert t.se > 5 * adj[("13101", 2010, 2)].se
+
+
+def test_time_adjustment_se_matches_contrast(quarterly_model):
+    _, m = quarterly_model
+    (a,) = time_adjustments(m, ["13101"], [(2011, 3)], 2013, 4)
+    ix, beta, cov = m.design.index, m.fit.beta, m.fit.cov
+    v = np.zeros(len(beta))
+    v[ix["時間:13101:0"]] += 1
+    v[ix["時間:13101:-2"]] -= 1
+    for k in (1, 2, 3):
+        v[ix[f"季內:0:{k}"]] += 0.25
+    v[ix["季內:-2:2"]] -= 1
+    assert a.log_factor == pytest.approx(v @ beta)
+    assert a.se == pytest.approx(math.sqrt(v @ cov @ v))
+
+
+def test_time_adjustment_needs_subperiod_and_known_quarters(quarterly_model, exact_model):
+    _, m = quarterly_model
+    (a,) = time_adjustments(m, ["13101"], [(2009, 4)], 2013, 4)  # 資料以前的季
+    assert a.basis is None and a.factor is None and a.low is None
+    with pytest.raises(ValueError, match="subperiod"):
+        time_adjustments(exact_model[1], ["13101"], [(2011, 1)], 2013, 4)
+
+
+def test_partial_first_period_uses_first_present_quarter_as_base():
+    # 最早一期缺第 0 季（資料從 2010Q2 開始）：基準要改成第 1 季，否則和區×期間共線
+    s = make_quarterly(np.random.default_rng(12))
+    s = s.subset(~((s.year == 2010) & (s.quarter == 1)))
+    m = fit_hedonic(s, window_period(s, 2013, 4), subperiod=window_subperiod(s, 2013, 4))
+    assert m.design.subperiod_base[-3] == 1 and "季內:-3:1" not in m.design.index
+    (a,) = time_adjustments(m, ["13101"], [(2010, 3)], 2013, 4)
+    assert a.log_factor == pytest.approx(true_log_factor("13101", -3, 2), abs=0.01)

@@ -18,8 +18,9 @@
 import math
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
+from typing import Literal
 
 import numpy as np
 import scipy.linalg
@@ -29,6 +30,7 @@ from scipy.sparse.csgraph import connected_components
 from tokyo_housing_lab.analysis.trend import (
     INVEST_WINDOW_YEARS,
     MIN_N,
+    Z95,
     Growth,
     LongTrend,
     Price,
@@ -120,6 +122,12 @@ def window_period(sample: Sample, last_year: int, last_quarter: int) -> np.ndarr
     return (qi - (last_year * 4 + last_quarter - 1) + 3) // 4
 
 
+def window_subperiod(sample: Sample, last_year: int, last_quarter: int) -> np.ndarray:
+    """在 window_period 的 4 季裡是第幾季（0〜3，0 = 最早的那一季）。時點修正用。"""
+    qi = sample.year.astype(int) * 4 + sample.quarter.astype(int) - 1
+    return (qi - (last_year * 4 + last_quarter - 1) + 3) % 4
+
+
 # ---- 特性的分類 ----
 
 _PLAN = re.compile(r"(\d+)([A-Z]*)((?:\+[A-Z]+)*)")
@@ -198,6 +206,8 @@ class Design:
     big_districts: set[str]
     absorbed: set[str]  # 當成基準的欄位（分類變數在資料裡沒有原本的基準類別時，最常見的那一類）
     pooled_cities: set[str]  # 町名全部併成一個的區（町名和期間分不開時）
+    subperiod: np.ndarray | None  # 期間內第幾季（有給才有「季內」欄位）
+    subperiod_base: dict[int, int]  # 各期間的基準季：該期有資料的第一季
 
 
 @dataclass
@@ -233,9 +243,16 @@ def _disconnected_cities(district: np.ndarray, cp: np.ndarray, city: np.ndarray,
 
 
 def design_matrix(
-    sample: Sample, period: np.ndarray, spec: Spec, template: Design | None = None
+    sample: Sample,
+    period: np.ndarray,
+    spec: Spec,
+    template: Design | None = None,
+    subperiod: np.ndarray | None = None,
 ) -> tuple[Design, np.ndarray]:
     """回傳 (Design, 用到的列)。
+
+    subperiod：期間內第幾季。有給時加上「季內」欄位（全東京共用，每期 3 個）：區×期間抓長期走勢，
+    季內抓一年之內的變化（小區的季資料太少，不分區估）。
 
     沒給 template：依資料決定欄位與基準。不放的列（keep = False）是：取引或成約不到 MIN_N 筆的區的成約資料
     （例如奥多摩町只有 2 筆成約、沒有取引：成約效果和町名效果分不開）。
@@ -312,6 +329,22 @@ def design_matrix(
     blocks.append(_categorical("容積率", sample.floor_area_ratio.astype(float), far_group))
     blocks.append(_Block([f"成約:{c}" for c in cities.tolist()], np.where(seiyaku, city_inv, -1)))
     blocks.append(_Block(sp_names, np.where(seiyaku, p_inv, -1)))
+    sub_base: dict[int, int] = {}
+    if subperiod is not None:
+        subperiod = np.asarray(subperiod, dtype=int)
+        if template is None:
+            # 基準季 = 該期有資料的第一季（最早一期可能缺前面幾季；拿沒資料的季當基準會和區×期間共線）
+            first = np.full(span, 4)
+            np.minimum.at(first, period[usable] - pmin, subperiod[usable])
+            sub_base = {p + pmin: int(k) for p, k in enumerate(first.tolist()) if k < 4}
+        else:
+            sub_base = template.subperiod_base
+        usub, sub_inv = np.unique((period - pmin) * 4 + subperiod, return_inverse=True)
+        sub_names = []
+        for code in usub.tolist():
+            p, k = code // 4 + pmin, code % 4
+            sub_names.append(None if sub_base.get(p) == k else f"季內:{p}:{k}")
+        blocks.append(_Block(sub_names, sub_inv))
 
     if template is None:
         names: list[str] = []
@@ -358,6 +391,7 @@ def design_matrix(
     design = Design(
         X, names, index, clusters, city[keep], period[keep], seiyaku[keep],
         base_period, seiyaku_base, seiyaku_cities, big, absorbed, pooled,
+        None if subperiod is None else subperiod[keep], sub_base,
     )  # fmt: skip
     return design, keep
 
@@ -440,23 +474,29 @@ class Model:
         return (0.0, 0.0) if i is None else (float(self.fit.beta[i]), math.sqrt(self.fit.cov[i, i]))
 
 
-def fit_hedonic(sample: Sample, period: np.ndarray, spec: Spec = Spec()) -> Model:
-    design, keep = design_matrix(sample, period, spec)
+def fit_hedonic(
+    sample: Sample, period: np.ndarray, spec: Spec = Spec(), subperiod: np.ndarray | None = None
+) -> Model:
+    design, keep = design_matrix(sample, period, spec, subperiod=subperiod)
     sample, period = sample.subset(keep), period[keep]
+    subperiod = None if subperiod is None else subperiod[keep]
     fit = fit_ols(design.X, sample.log_price, design.clusters, design.names)
     inlier = np.abs(fit.resid - np.median(fit.resid)) <= OUTLIER_SIGMAS * fit.sigma
     outliers = int((~inlier).sum())
     if outliers:
         sample, period = sample.subset(inlier), period[inlier]
-        design, keep = design_matrix(sample, period, spec)
+        subperiod = None if subperiod is None else subperiod[inlier]
+        design, keep = design_matrix(sample, period, spec, subperiod=subperiod)
         sample = sample.subset(keep)
         fit = fit_ols(design.X, sample.log_price, design.clusters, design.names)
     return Model(spec, design, fit, sample, outliers)
 
 
-def predict(model: Model, sample: Sample, period: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def predict(
+    model: Model, sample: Sample, period: np.ndarray, subperiod: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray]:
     """回傳 (預測的 ln 單價, 能預測的列)。"""
-    design, keep = design_matrix(sample, period, model.spec, template=model.design)
+    design, keep = design_matrix(sample, period, model.spec, template=model.design, subperiod=subperiod)
     return design.X @ model.fit.beta, keep
 
 
@@ -550,6 +590,121 @@ def hedonic_price(series: HedonicSeries | None, period: int) -> Price:
     if n < MIN_N:
         return Price(None, None, None, n, "insufficient")
     return price_from_log(series.levels[period], series.level_se[period], n)
+
+
+# ---- 時點修正 ----
+
+
+@dataclass(frozen=True)
+class Adjustment:
+    """某區某季的成交，換算成目標期（最新 4 季）平均水準要乘的係數。basis = None：無法修正。"""
+
+    city: str
+    year: int
+    quarter: int
+    log_factor: float | None
+    se: float | None
+    basis: Literal["city", "tokyo"] | None  # city = 用該區自己的指數；tokyo = 樣本不足，用全東京的
+    n: int  # 該區在那一期（4 季）的筆數
+
+    @property
+    def factor(self) -> float | None:
+        return None if self.log_factor is None else math.exp(self.log_factor)
+
+    @property
+    def low(self) -> float | None:
+        return None if self.log_factor is None else math.exp(self.log_factor - Z95 * self.se)
+
+    @property
+    def high(self) -> float | None:
+        return None if self.log_factor is None else math.exp(self.log_factor + Z95 * self.se)
+
+
+def time_adjustments(
+    model: Model,
+    cities: Sequence[str],
+    quarters: Sequence[tuple[int, int]],
+    last_year: int,
+    last_quarter: int,
+) -> list[Adjustment]:
+    """model 要用 window_period ＋ window_subperiod 估（同一個 last_year、last_quarter）。
+
+    ln(係數) = [區×期間₀ ＋ 期間₀ 內各季的平均] − [區×期間_w ＋ 期間_w 內第 k 季]
+    町名、典型物件、成約等其他項目兩邊一樣，相減抵銷；誤差用對比向量 × cluster-robust 共變異。
+    該區在那一期或目標期不到 MIN_N 筆（或模型裡沒有這區）→ 用全東京的係數：各區的係數依目標期筆數加權平均。
+    這時不知道這區自己的走勢，區間另外加上「各區係數圍繞全東京平均的離散」（當成隨機抽一區），
+    不然只反映全東京平均本身的誤差，會窄得不合理。
+    """
+    d, beta, cov = model.design, model.fit.beta, model.fit.cov
+    if d.subperiod is None:
+        raise ValueError("時點修正要用加了 subperiod（期間內第幾季）的模型")
+    size = len(d.names)
+    counts = Counter(zip(d.city.tolist(), d.period.tolist(), strict=True))
+    present = {(int(w), int(k)) for w, k in zip(d.period.tolist(), d.subperiod.tolist(), strict=True)}
+
+    def unit(name: str) -> np.ndarray:
+        v = np.zeros(size)
+        v[d.index[name]] = 1.0
+        return v
+
+    def quarter_vec(w: int, k: int) -> np.ndarray | None:
+        if (w, k) not in present:
+            return None
+        return np.zeros(size) if d.subperiod_base.get(w) == k else unit(f"季內:{w}:{k}")
+
+    def city_vec(c: str, w: int) -> np.ndarray | None:
+        if f"時間:{c}:{w}" in d.index:
+            return unit(f"時間:{c}:{w}")
+        return np.zeros(size) if d.base_period.get(c) == w else None
+
+    target_q = [v for k in range(4) if (v := quarter_vec(0, k)) is not None]
+    target_q_mean = np.mean(target_q, axis=0)
+    model_cities = sorted(set(d.city.tolist()))
+
+    def eligible(c: str, w: int) -> bool:
+        return counts[(c, w)] >= MIN_N and counts[(c, 0)] >= MIN_N and city_vec(c, w) is not None and city_vec(c, 0) is not None
+
+    tokyo_cache: dict[int, tuple[np.ndarray, float] | None] = {}
+
+    def tokyo_city_part(w: int) -> tuple[np.ndarray, float] | None:
+        """(Σ a_c (區×期間₀ − 區×期間_w), 各區圍繞它的加權變異)，a_c ∝ 目標期筆數。"""
+        if w not in tokyo_cache:
+            cs = [c for c in model_cities if eligible(c, w)]
+            if not cs:
+                tokyo_cache[w] = None
+            else:
+                weights = np.array([counts[(c, 0)] for c in cs], dtype=float)
+                weights /= weights.sum()
+                parts = [city_vec(c, 0) - city_vec(c, w) for c in cs]
+                mean = sum(a * v for a, v in zip(weights, parts, strict=True))
+                values = np.array([v @ beta for v in parts])
+                spread = float(weights @ (values - mean @ beta) ** 2)
+                tokyo_cache[w] = (mean, spread)
+        return tokyo_cache[w]
+
+    last_qi = last_year * 4 + last_quarter - 1
+    out = []
+    for c in cities:
+        for y, q in quarters:
+            r = y * 4 + q - 1 - last_qi + 3
+            w, k = r // 4, r % 4
+            n = counts[(c, w)]
+            qv = quarter_vec(w, k)
+            if qv is None:
+                out.append(Adjustment(c, y, q, None, None, None, n))
+                continue
+            extra = 0.0
+            if eligible(c, w):
+                diff, basis = city_vec(c, 0) - city_vec(c, w), "city"
+            elif (part := tokyo_city_part(w)) is not None:
+                (diff, extra), basis = part, "tokyo"
+            else:
+                out.append(Adjustment(c, y, q, None, None, None, n))
+                continue
+            diff = diff + target_q_mean - qv
+            se = math.sqrt(max(0.0, _quad(diff, diff, cov)) + extra)
+            out.append(Adjustment(c, y, q, float(diff @ beta), se, basis, n))
+    return out
 
 
 # ---- 報告用 ----
