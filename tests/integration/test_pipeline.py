@@ -85,3 +85,37 @@ def test_pipeline_real_api(tmp_path):
         median, n = expected[(r.year, r.quarter, r.price_classification)]
         assert r.median_unit_price == pytest.approx(median)
         assert r.n + r.n_excluded == n
+
+
+def test_area_pipeline_to_map(tmp_path):
+    """東京都全域（area=13）：mock 抓取 → 清理 → DuckDB → 分析 → 地圖 HTML。"""
+    from tokyo_housing_lab.analysis.municipalities import build_analysis
+    from tokyo_housing_lab.map.build import render_html
+
+    samples = {pc: (FIXTURES / f"xit001_13202_2024Q1_p{pc}_sample.json").read_bytes() for pc in ("01", "02")}
+    requested = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.params
+        requested.append(dict(p))
+        if (p["year"], p["quarter"]) != ("2024", "1"):
+            return httpx.Response(404)
+        return httpx.Response(200, content=gzip.compress(samples[p["priceClassification"]]), headers={"Content-Encoding": "gzip"})
+
+    clock = FakeClock()
+    raw_dir = tmp_path / "raw"
+    with ReinfolibClient(ApiKey(FAKE_KEY), transport=httpx.MockTransport(handler), clock=clock, sleep=clock.sleep) as client:
+        fetch_range(client, RawStore(raw_dir), "13", (2024, 1), date(2024, 4, 1))
+    assert all(r["area"] == "13" and "city" not in r for r in requested)
+
+    with DuckDBStore(tmp_path / "t.duckdb") as store:
+        load_raw_dir(raw_dir, store)
+        analysis = build_analysis(store)
+    html = render_html(analysis, date(2026, 10, 28))
+    payload = json.loads(html.split('<script id="map-data" type="application/json">', 1)[1].split("</script>", 1)[0])
+    tachikawa = payload["data"]["municipalities"][TACHIKAWA]
+    assert tachikawa["name"] == "立川市"
+    assert tachikawa["latest"]["01"]["n"] == 3  # 樣本裡 3 筆中古マンション
+    assert tachikawa["latest"]["01"]["status"] == "insufficient"  # 遠少於 30 筆
+    # 「最新 4 季」是以最新一季往回推的固定期間；這份資料剛好只有其中一季有成交
+    assert payload["data"]["priceTypes"]["01"]["latestPeriod"] == "2023Q2〜2024Q1"

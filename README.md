@@ -2,7 +2,7 @@
 
 東京中古公寓行情分析工具（個人學習用）。資料來源為國土交通省的公開 API（XIT001）。
 
-目前進度：M1（立川市 → DuckDB）完成；資料已擴大到東京都全域（2005Q3〜最新季），地圖開發中。
+目前進度：M1（立川市 → DuckDB）完成；資料擴大到東京都全域（2005Q3〜最新季），並加上市區町村地圖（趨勢／購買／投資模式）。
 
 ## 環境準備
 
@@ -23,7 +23,21 @@ uv run tokyo-housing-lab query   # 每季 ㎡ 單價中位數與筆數（中古�
 uv run tokyo-housing-lab analyze buy                       # 各區最新 4 季的 ㎡ 單價中位數排行
 uv run tokyo-housing-lab analyze trend --from 2015 --to 2025  # 各區起訖年的漲幅排行
 uv run tokyo-housing-lab analyze invest                    # 各區最近 10 年的年成長率排行
+uv run tokyo-housing-lab map     # 產生 data/tokyo_map.html，用瀏覽器打開
 ```
+
+### 地圖
+
+`data/tokyo_map.html` 是一個單檔 HTML（資料和邊界都嵌在裡面，只有 d3 從 cdnjs 載入）：
+
+- **趨勢模式**：選起年和迄年，看各區 ㎡ 單價中位數漲了多少（紅＝漲、藍＝跌）
+- **購買模式**：最新 4 季的 ㎡ 單價中位數，顏色越深越貴
+- **投資模式**：最近 10 年的年成長率（過去走勢的整理，不是預測）
+- 點地圖上的區或排行裡的名字，右側（手機在下方）會顯示詳細資料：最新價格、每年的中位數走勢、建築年代別中位數
+- 灰色＝樣本不足（一年少於 30 筆）；斜線＝區間包含 0（看不出漲跌）或區間太寬（不確定）
+
+邊界資料 `src/tokyo_housing_lab/map/tokyo_municipalities.geojson` 由 `scripts/prepare_boundaries.py` 產生：
+「国土数値情報（行政区域データ）」（国土交通省）を加工して作成（スマートニュース メディア研究所 japan-topography の簡略化データを使用）。
 
 `analyze` 的數字都附 95% 區間；一年（或最新 4 季）少於 30 筆的區標成「樣本不足」，
 區間包含 0 或太寬的標成「看不出漲跌／不確定」。計算方式寫在 `src/tokyo_housing_lab/analysis/trend.py`。

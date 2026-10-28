@@ -4,6 +4,7 @@
   load ：只讀 data/raw/，清理後寫進 DuckDB（不打 API）
   query：每季 ㎡ 單價中位數與筆數（只讀 DuckDB）
   analyze：各市區町村的排行（購買／趨勢／投資模式，只讀 DuckDB）
+  map  ：產生地圖 HTML（只讀 DuckDB）
 """
 
 import argparse
@@ -161,6 +162,22 @@ def _analyze(args: argparse.Namespace) -> None:
     print(DISCLAIMER)
 
 
+DEFAULT_MAP_PATH = Path("data/tokyo_map.html")
+
+
+def _map(args: argparse.Namespace) -> None:
+    from tokyo_housing_lab.map.build import render_html
+
+    if not args.db.is_file():
+        raise FileNotFoundError(f"找不到資料庫 {args.db}，請先執行 load")
+    with DuckDBStore(args.db) as store:
+        a = build_analysis(store, args.region)
+    html = render_html(a, date.today(), standalone=not args.fragment)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(html, encoding="utf-8")
+    print(f"地圖已產生：{args.out}（{len(html.encode()) // 1024} KB，{len(a.municipalities)} 個市區町村）。用瀏覽器打開即可。")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tokyo-housing-lab", epilog=DISCLAIMER)
     sub = parser.add_subparsers(dest="command")
@@ -200,6 +217,13 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--region", default=TOKYO)
     analyze.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     analyze.set_defaults(handler=_analyze)
+
+    map_ = sub.add_parser("map", help="產生地圖 HTML（趨勢／購買／投資模式）", epilog=DISCLAIMER)
+    map_.add_argument("--out", type=Path, default=DEFAULT_MAP_PATH, help=f"輸出位置（預設 {DEFAULT_MAP_PATH}）")
+    map_.add_argument("--fragment", action="store_true", help="只輸出內容片段，不含 <html>／<head>")
+    map_.add_argument("--region", default=TOKYO)
+    map_.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    map_.set_defaults(handler=_map)
     return parser
 
 

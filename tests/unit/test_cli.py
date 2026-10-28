@@ -159,3 +159,21 @@ def test_analyze_invest_all_insufficient(analysis_db, capsys):
 def test_analyze_without_db(tmp_path, capsys):
     assert cli.main(["analyze", "buy", "--db", str(tmp_path / "none.duckdb")]) == 1
     assert "load" in capsys.readouterr().err
+
+
+def test_map_command(analysis_db, tmp_path, capsys):
+    out = tmp_path / "m" / "map.html"
+    assert cli.main(["map", "--db", str(analysis_db), "--out", str(out)]) == 0
+    assert out.read_text(encoding="utf-8").startswith("<!doctype html>")
+    assert "地圖已產生" in capsys.readouterr().out
+
+
+def test_map_fragment(analysis_db, tmp_path):
+    out = tmp_path / "frag.html"
+    assert cli.main(["map", "--db", str(analysis_db), "--out", str(out), "--fragment"]) == 0
+    assert out.read_text(encoding="utf-8").startswith("<title>")
+
+
+def test_map_without_db(tmp_path, capsys):
+    assert cli.main(["map", "--db", str(tmp_path / "none.duckdb"), "--out", str(tmp_path / "x.html")]) == 1
+    assert not (tmp_path / "x.html").exists()

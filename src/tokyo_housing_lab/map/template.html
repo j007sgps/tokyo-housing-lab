@@ -1,0 +1,542 @@
+<title>東京中古マンション地図</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Shippori+Mincho+B1:wght@600&display=swap">
+<style>
+  /* 版面：上方控制列 → 地圖（左）＋詳細面板（右，窄螢幕時移到下方）→ 排行 → 說明 */
+  :root {
+    --bg: #eef1f4;
+    --panel: #ffffff;
+    --fg: #16202b;
+    --muted: #586473;
+    --line: #d6dce3;
+    --accent: #1f5f8b;
+    --accent-ink: #ffffff;
+    --na: #c7cdd4;
+    --hatch: rgba(22, 32, 43, 0.55);
+    --boundary: #ffffff;
+    --font-display: "Shippori Mincho B1", "Hiragino Mincho ProN", "Yu Mincho", serif;
+    --font-body: "Noto Sans TC", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f141a; --panel: #18202a; --fg: #e5eaf0; --muted: #98a4b1; --line: #2a3542;
+      --accent: #7db3e3; --accent-ink: #0f141a; --na: #39434e; --hatch: rgba(229, 234, 240, 0.6); --boundary: #0f141a;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f141a; --panel: #18202a; --fg: #e5eaf0; --muted: #98a4b1; --line: #2a3542;
+    --accent: #7db3e3; --accent-ink: #0f141a; --na: #39434e; --hatch: rgba(229, 234, 240, 0.6); --boundary: #0f141a;
+    color-scheme: dark;
+  }
+  body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.6; }
+  [hidden] { display: none !important; }
+  .tm { max-width: 1240px; margin-inline: auto; padding-block: 20px 40px;
+        padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+        display: flex; flex-direction: column; gap: 16px; }
+  .tm-head h1 { margin: 0; font-family: var(--font-display); font-weight: 600; font-size: clamp(1.6rem, 4vw, 2.2rem); letter-spacing: .04em; text-wrap: balance; }
+  .tm-head p { margin: 4px 0 0; color: var(--muted); font-size: .9rem; }
+  .tm-controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: end; }
+  .tm-field { display: flex; flex-direction: column; gap: 4px; }
+  .tm-label { font-size: .75rem; color: var(--muted); letter-spacing: .06em; }
+  .tm-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); padding: 3px; }
+  .tm-seg button { border: 0; background: transparent; color: var(--fg); font: inherit; font-size: .9rem; padding: 5px 14px; border-radius: 999px; cursor: pointer; }
+  .tm-seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); font-weight: 500; }
+  .tm-seg button:disabled { color: var(--muted); cursor: not-allowed; opacity: .55; }
+  .tm-seg button:focus-visible, .tm select:focus-visible, .tm-rank button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .tm select { font: inherit; font-size: .9rem; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
+  .tm-years { display: flex; align-items: center; gap: 6px; }
+  .tm-explain { margin: 0; color: var(--muted); font-size: .88rem; max-width: 70ch; }
+  .tm-main { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+  @media (max-width: 860px) { .tm-main { grid-template-columns: minmax(0, 1fr); } }
+  .tm-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; min-width: 0; }
+  .tm-map { position: relative; }
+  .tm-map svg { display: block; width: 100%; height: auto; }
+  .tm-map path.area { stroke: var(--boundary); stroke-width: .8; cursor: pointer; }
+  .tm-map path.area:hover { stroke: var(--fg); stroke-width: 1.4; }
+  .tm-map path.selected { stroke: var(--fg); stroke-width: 2.4; }
+  .tm-tip { position: absolute; pointer-events: none; z-index: 3; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+            box-shadow: 0 4px 16px rgba(0,0,0,.15); padding: 6px 10px; font-size: .82rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .tm-tip b { display: block; font-weight: 500; }
+  .tm-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-top: 8px; font-size: .78rem; color: var(--muted); }
+  .tm-map .tm-legend svg { display: block; width: 240px; max-width: 100%; height: auto; }
+  .tm-legend text { fill: var(--muted); font-size: 11px; font-family: var(--font-body); }
+  .tm-key { display: inline-flex; align-items: center; gap: 6px; }
+  .tm-swatch { width: 18px; height: 12px; border-radius: 2px; border: 1px solid var(--line); }
+  .tm-panel h2 { margin: 0; font-family: var(--font-display); font-weight: 600; font-size: 1.5rem; }
+  .tm-panel h3 { margin: 14px 0 4px; font-size: .85rem; font-weight: 500; color: var(--muted); letter-spacing: .04em; }
+  .tm-big { font-size: 2rem; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.2; }
+  .tm-big small { font-size: .9rem; font-weight: 400; color: var(--muted); margin-left: 4px; }
+  .tm-sub { color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
+  .tm-badge { display: inline-block; font-size: .72rem; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); margin-left: 6px; vertical-align: middle; }
+  .tm-badge.warn { border-color: var(--muted); }
+  .tm-kv { width: 100%; border-collapse: collapse; font-size: .85rem; font-variant-numeric: tabular-nums; }
+  .tm-kv th, .tm-kv td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: right; }
+  .tm-kv th:first-child, .tm-kv td:first-child { text-align: left; }
+  .tm-kv th { font-weight: 500; color: var(--muted); font-size: .75rem; }
+  .tm-chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .tm-chart text { fill: var(--muted); font-size: 11px; font-family: var(--font-body); }
+  .tm-rank { max-height: 26rem; overflow: auto; }
+  .tm-rank table { width: 100%; border-collapse: collapse; font-size: .88rem; font-variant-numeric: tabular-nums; }
+  .tm-rank th { position: sticky; top: 0; background: var(--panel); text-align: right; font-weight: 500; color: var(--muted); font-size: .75rem; padding: 6px; border-bottom: 1px solid var(--line); }
+  .tm-rank td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: right; }
+  .tm-rank th:nth-child(2), .tm-rank td:nth-child(2) { text-align: left; }
+  .tm-rank button { font: inherit; color: var(--fg); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
+  .tm-rank tr.selected td { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .tm-rank tr.dim td { color: var(--muted); }
+  .tm-dot { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .tm-notes { color: var(--muted); font-size: .8rem; display: flex; flex-direction: column; gap: 6px; }
+  .tm-notes p { margin: 0; max-width: 90ch; }
+  .tm-notes strong { color: var(--fg); font-weight: 500; }
+  @media (prefers-reduced-motion: no-preference) {
+    .tm-map path.area { transition: fill .35s ease; }
+  }
+</style>
+
+<div class="tm">
+  <header class="tm-head">
+    <h1>東京中古マンション地図</h1>
+    <p id="tm-source">—</p>
+  </header>
+
+  <section class="tm-controls" aria-label="顯示設定">
+    <div class="tm-field">
+      <span class="tm-label">模式</span>
+      <div class="tm-seg" role="group" aria-label="模式">
+        <button type="button" id="mode-trend" data-mode="trend" aria-pressed="true">趨勢</button>
+        <button type="button" id="mode-buy" data-mode="buy" aria-pressed="false">購買</button>
+        <button type="button" id="mode-invest" data-mode="invest" aria-pressed="false">投資</button>
+      </div>
+    </div>
+    <div class="tm-field">
+      <span class="tm-label">價格種類</span>
+      <div class="tm-seg" role="group" aria-label="價格種類">
+        <button type="button" id="pc-01" data-pc="01" aria-pressed="true">取引價格</button>
+        <button type="button" id="pc-02" data-pc="02" aria-pressed="false">成約價格</button>
+      </div>
+    </div>
+    <div class="tm-field" id="years-field">
+      <span class="tm-label">比較期間</span>
+      <div class="tm-years">
+        <select id="year-start" aria-label="起年"></select>
+        <span aria-hidden="true">→</span>
+        <select id="year-end" aria-label="迄年"></select>
+      </div>
+    </div>
+  </section>
+  <p class="tm-explain" id="tm-explain">—</p>
+
+  <div class="tm-main">
+    <section class="tm-card tm-map" aria-label="地圖">
+      <div id="map"></div>
+      <div class="tm-legend" id="legend"></div>
+    </section>
+    <aside class="tm-card tm-panel" id="panel" aria-live="polite"></aside>
+  </div>
+
+  <section class="tm-card" aria-label="排行">
+    <h3 style="margin:0 0 8px;font-size:.95rem;font-weight:500;" id="rank-title">排行</h3>
+    <div class="tm-rank"><table><thead><tr><th>#</th><th>市區町村</th><th id="rank-col">值</th><th>95% 區間</th><th>筆數</th></tr></thead><tbody id="rank-body"></tbody></table></div>
+  </section>
+
+  <footer class="tm-notes">
+    <p><strong>怎麼算的</strong>：中古マンション等的 ㎡ 單價（成交價 ÷ 面積）中位數。購買模式用最新 4 季；趨勢模式比較起年與迄年的年度中位數；投資模式用最近 10 個完整年的年度中位數取對數做最小平方法，得到每年的平均成長率。所有數字都附 95% 區間。</p>
+    <p><strong>灰色與斜線</strong>：<span id="note-thresholds">—</span></p>
+    <p><strong>限制</strong>：中位數會受「那年賣出的物件組成」（新舊、大小、地點）影響，還沒做時點修正或品質調整；API 的面積已四捨五入到 5㎡。<span id="note-advice">—</span></p>
+    <p id="note-disclaimer">—</p>
+    <p id="note-credit">—</p>
+  </footer>
+</div>
+
+<script id="map-data" type="application/json">/*__MAP_DATA__*/null</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script>
+(() => {
+  const { data, boundaries } = JSON.parse(document.getElementById("map-data").textContent);
+  const M = data.municipalities;
+  const T = data.thresholds;
+  const DEFAULT_CITY = "13104"; // 一打開先選新宿区，面板就有內容
+
+  // ---- 狀態 ----
+  const pts = data.priceTypes;
+  const years01 = pts["01"].completeYears;
+  const state = {
+    mode: "trend",
+    pc: "01",
+    start: years01[Math.max(0, years01.length - 11)],
+    end: years01[years01.length - 1],
+    selected: M[DEFAULT_CITY] ? DEFAULT_CITY : Object.keys(M)[0],
+  };
+
+  // ---- 格式 ----
+  const man = (yen) => (yen / 10000).toFixed(1);
+  const pct = (x) => (x > 0 ? "+" : x < 0 ? "−" : "±") + Math.abs(x * 100).toFixed(1) + "%";
+  const fmtN = d3.format(",");
+  const nameOf = (code, fallback) => (M[code] ? M[code].name.replace(/^西多摩郡/, "") : fallback);
+
+  // ---- 每個模式的值：{v, lo, hi, n, status} ----
+  function valueOf(code) {
+    const m = M[code];
+    if (!m) return { status: "insufficient", n: 0 };
+    if (state.mode === "buy") {
+      const p = m.latest[state.pc];
+      if (!p) return { status: "insufficient", n: 0 };
+      return { v: p.median, lo: p.low, hi: p.high, n: p.n, status: p.status };
+    }
+    if (state.mode === "trend") {
+      const g = (m.growth[state.pc] || {})[`${state.start}-${state.end}`];
+      const yearN = (y) => ((m.yearly[state.pc] || []).find((r) => r[0] === y) || [y, 0])[1];
+      const n = `${fmtN(yearN(state.start))}／${fmtN(yearN(state.end))}`;
+      if (!g) return { status: "insufficient", n };
+      return { v: g[0], lo: g[1], hi: g[2], n, status: g[3] ? "uncertain" : "ok" };
+    }
+    const t = m.invest;
+    if (!t || t.status === "insufficient") return { status: "insufficient", n: t ? `${t.years} 年` : "0 年" };
+    return { v: t.annual, lo: t.low, hi: t.high, n: `${t.years} 年`, status: t.status };
+  }
+  const fmtValue = (v) => (state.mode === "buy" ? `${man(v)} 萬` : state.mode === "trend" ? pct(v) : `${pct(v)}/年`);
+  const fmtRange = (lo, hi) => (state.mode === "buy" ? `${man(lo)}〜${man(hi)}` : `${pct(lo)}〜${pct(hi)}`);
+
+  // ---- 顏色 ----
+  function colorScale() {
+    const vals = Object.keys(M).map(valueOf).filter((x) => x.status !== "insufficient").map((x) => x.v);
+    if (!vals.length) return () => "var(--na)";
+    if (state.mode === "buy") {
+      // 色階最淺的一段接近白色，會被看成「沒資料」，所以從 18% 開始
+      const s = d3.scaleSequentialLog(d3.extent(vals), (t) => d3.interpolatePuBu(0.18 + 0.82 * t));
+      s.kind = "seq";
+      return s;
+    }
+    const max = d3.max(vals, Math.abs) || 0.01;
+    const s = d3.scaleDiverging([-max, 0, max], (t) => d3.interpolateRdBu(1 - t));
+    s.kind = "div";
+    return s;
+  }
+
+  // ---- 地圖 ----
+  // d3 的球面幾何要求外環順時針；GeoJSON（RFC 7946）是逆時針，面積會變成「整個地球減掉這塊」，要反過來
+  for (const f of boundaries.features) {
+    if (d3.geoArea(f) > 2 * Math.PI) {
+      const g = f.geometry;
+      const polys = g.type === "Polygon" ? [g.coordinates] : g.coordinates;
+      for (const poly of polys) for (const ring of poly) ring.reverse();
+    }
+  }
+  const mapEl = document.getElementById("map");
+  const tip = document.createElement("div");
+  tip.className = "tm-tip";
+  tip.hidden = true;
+  mapEl.parentElement.append(tip);
+
+  function drawMap() {
+    const w = mapEl.clientWidth || 600;
+    const h = Math.round(w * 0.56);
+    const proj = d3.geoMercator().fitExtent([[6, 6], [w - 6, h - 6]], boundaries);
+    const path = d3.geoPath(proj);
+    const color = colorScale();
+    mapEl.replaceChildren();
+    const svg = d3.select(mapEl).append("svg").attr("viewBox", `0 0 ${w} ${h}`).attr("role", "img")
+      .attr("aria-label", "東京都市區町村地圖");
+    const defs = svg.append("defs");
+    defs.append("pattern").attr("id", "hatch").attr("width", 6).attr("height", 6)
+      .attr("patternUnits", "userSpaceOnUse").attr("patternTransform", "rotate(45)")
+      .append("line").attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", 6)
+      .style("stroke", "var(--hatch)").attr("stroke-width", 1.6);
+
+    const g = svg.append("g");
+    const feats = boundaries.features;
+    g.selectAll("path.area").data(feats).join("path")
+      .attr("class", (f) => "area" + (f.properties.code === state.selected ? " selected" : ""))
+      .attr("d", path)
+      .style("fill", (f) => {
+        const x = valueOf(f.properties.code);
+        return x.status === "insufficient" ? "var(--na)" : color(x.v);
+      })
+      .on("pointermove", (ev, f) => {
+        const x = valueOf(f.properties.code);
+        tip.replaceChildren();
+        const b = document.createElement("b");
+        b.textContent = nameOf(f.properties.code, f.properties.name);
+        tip.append(b, document.createTextNode(
+          x.status === "insufficient" ? "樣本不足" : fmtValue(x.v) + (x.status === "uncertain" ? "（不確定）" : "")
+        ));
+        tip.hidden = false;
+        const [px, py] = d3.pointer(ev, mapEl.parentElement);
+        const tw = tip.offsetWidth;
+        const maxX = mapEl.parentElement.clientWidth - tw - 4;
+        tip.style.left = `${Math.max(4, Math.min(maxX, px + 14))}px`;
+        tip.style.top = `${Math.max(4, py - 40)}px`;
+      })
+      .on("pointerleave", () => { tip.hidden = true; })
+      .on("click", (ev, f) => select(f.properties.code));
+    // 不確定（區間包含 0 或太寬）：上面再疊一層斜線
+    g.selectAll("path.hatch").data(feats.filter((f) => valueOf(f.properties.code).status === "uncertain")).join("path")
+      .attr("class", "hatch").attr("d", path).style("fill", "url(#hatch)").style("pointer-events", "none");
+    // 選取的區描邊畫在最上層
+    const sel = feats.find((f) => f.properties.code === state.selected);
+    if (sel) g.append("path").attr("d", path(sel)).style("fill", "none").style("stroke", "var(--fg)")
+      .attr("stroke-width", 2.4).style("pointer-events", "none");
+    drawLegend(color);
+  }
+
+  function drawLegend(color) {
+    const el = document.getElementById("legend");
+    el.replaceChildren();
+    if (color.domain) {
+      const w = 240, h = 34;
+      const svg = d3.select(el).append("svg").attr("width", w).attr("height", h).attr("viewBox", `0 0 ${w} ${h}`);
+      const id = "lg-grad";
+      const grad = svg.append("defs").append("linearGradient").attr("id", id);
+      const dom = color.domain();
+      const lo = dom[0], hi = dom[dom.length - 1];
+      const at = (t) => (color.kind === "seq" ? Math.exp(Math.log(lo) + t * (Math.log(hi) - Math.log(lo))) : lo + t * (hi - lo));
+      d3.range(0, 1.0001, 0.1).forEach((t) => grad.append("stop").attr("offset", `${t * 100}%`).attr("stop-color", color(at(t))));
+      svg.append("rect").attr("x", 4).attr("y", 2).attr("width", w - 8).attr("height", 10).attr("rx", 2).style("fill", `url(#${id})`);
+      const ticks = color.kind === "seq" ? [lo, Math.sqrt(lo * hi), hi] : [lo, 0, hi];
+      ticks.forEach((v, i) => svg.append("text").attr("x", 4 + (i / 2) * (w - 8)).attr("y", 28)
+        .attr("text-anchor", i === 0 ? "start" : i === 2 ? "end" : "middle").text(fmtValue(v)));
+    }
+    const key = (cls, label) => {
+      const k = document.createElement("span");
+      k.className = "tm-key";
+      const s = document.createElement("span");
+      s.className = "tm-swatch";
+      if (cls === "na") s.style.background = "var(--na)";
+      else s.style.background = "repeating-linear-gradient(45deg, var(--hatch) 0 1.5px, transparent 1.5px 5px)";
+      k.append(s, document.createTextNode(label));
+      el.append(k);
+    };
+    key("na", "樣本不足／沒有成交");
+    if (state.mode !== "buy") key("hatch", state.mode === "trend" ? "看不出漲跌（區間包含 0）" : "不確定（區間太寬）");
+  }
+
+  // ---- 詳細面板 ----
+  const panel = document.getElementById("panel");
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
+  function drawPanel() {
+    const code = state.selected;
+    const m = M[code];
+    const feat = boundaries.features.find((f) => f.properties.code === code);
+    panel.replaceChildren();
+    panel.append(el("h2", null, nameOf(code, feat ? feat.properties.name : code)));
+    if (!m) {
+      panel.append(el("p", "tm-sub", "這裡沒有中古マンション的成交紀錄。"));
+      return;
+    }
+    const x = valueOf(code);
+    const modeLabel = { trend: `${state.start} → ${state.end} 年漲幅`, buy: `最新 4 季（${pts[state.pc].latestPeriod}）㎡ 單價`, invest: `${data.investWindow[0]}〜${data.investWindow[1]} 年 年成長率` }[state.mode];
+    const head = el("div");
+    head.append(el("div", "tm-sub", `${modeLabel}（${state.mode === "invest" ? "取引價格" : pts[state.pc].label}）`));
+    const big = el("div", "tm-big");
+    if (x.status === "insufficient") {
+      big.textContent = "樣本不足";
+    } else {
+      big.textContent = state.mode === "buy" ? man(x.v) : state.mode === "trend" ? pct(x.v) : pct(x.v);
+      big.append(el("small", null, state.mode === "buy" ? "萬日圓／㎡" : state.mode === "invest" ? "／年" : ""));
+      if (x.status === "uncertain") big.append(el("span", "tm-badge warn", state.mode === "trend" ? "看不出漲跌" : "不確定"));
+    }
+    head.append(big);
+    if (x.status !== "insufficient") head.append(el("div", "tm-sub", `95% 區間 ${fmtRange(x.lo, x.hi)}　筆數 ${x.n}`));
+    else head.append(el("div", "tm-sub", state.mode === "invest"
+      ? `10 年中達到 ${T.minN} 筆的年份不到 ${T.investMinYears} 年（${x.n}）`
+      : `需要每年（或最新 4 季）至少 ${T.minN} 筆；目前 ${x.n}`));
+    panel.append(head);
+
+    // 最新 4 季
+    panel.append(el("h3", null, `最新 4 季的 ㎡ 單價中位數（萬日圓）`));
+    const kv = el("table", "tm-kv");
+    const tr0 = el("tr");
+    ["", "中位數", "95% 區間", "筆數"].forEach((t) => tr0.append(el("th", null, t)));
+    kv.append(tr0);
+    for (const pc of Object.keys(pts)) {
+      const p = m.latest[pc];
+      const tr = el("tr");
+      tr.append(el("td", null, `${pts[pc].label}（${pts[pc].latestPeriod}）`));
+      if (!p || p.median == null) { tr.append(el("td", null, "—"), el("td", null, "—"), el("td", null, "0")); }
+      else {
+        tr.append(el("td", null, man(p.median)), el("td", null, p.status === "ok" ? `${man(p.low)}〜${man(p.high)}` : "樣本不足"), el("td", null, fmtN(p.n)));
+      }
+      kv.append(tr);
+    }
+    panel.append(kv);
+
+    panel.append(el("h3", null, "每年的 ㎡ 單價中位數（萬日圓）"));
+    const c1 = el("div", "tm-chart");
+    panel.append(c1);
+    drawYearly(c1, m);
+    panel.append(el("p", "tm-sub", `空心點：當年未滿 ${T.minN} 筆，僅供參考。`));
+
+    if (m.byAge.length) {
+      panel.append(el("h3", null, `依建築年代（取引價格，${data.investWindow[1] - 4}〜${data.investWindow[1]} 年）`));
+      const c2 = el("div", "tm-chart");
+      panel.append(c2);
+      drawByAge(c2, m.byAge);
+    }
+  }
+
+  function drawYearly(container, m) {
+    const w = Math.max(260, panel.clientWidth - 30), h = 170, ml = 34, mr = 74, mt = 8, mb = 22;
+    const series = Object.keys(pts).map((pc, i) => ({ pc, label: pts[pc].label, color: i === 0 ? "var(--accent)" : "#d07a2c", rows: m.yearly[pc] || [] }))
+      .filter((s) => s.rows.length);
+    const all = series.flatMap((s) => s.rows);
+    if (!all.length) { container.append(el("p", "tm-sub", "沒有完整年的資料。")); return; }
+    const years = d3.extent(all, (r) => r[0]);
+    const x = d3.scaleLinear(years[0] === years[1] ? [years[0] - 1, years[1] + 1] : years, [ml, w - mr]);
+    const y = d3.scaleLinear([0, d3.max(all, (r) => r[2]) * 1.1], [h - mb, mt]).nice();
+    const svg = d3.select(container).append("svg").attr("viewBox", `0 0 ${w} ${h}`);
+    svg.append("g").selectAll("line").data(y.ticks(4)).join("line").attr("x1", ml).attr("x2", w - mr)
+      .attr("y1", (d) => y(d)).attr("y2", (d) => y(d)).style("stroke", "var(--line)");
+    svg.append("g").selectAll("text").data(y.ticks(4)).join("text").attr("x", ml - 6).attr("y", (d) => y(d)).attr("dy", "0.32em")
+      .attr("text-anchor", "end").text((d) => d / 10000);
+    const xt = x.ticks(Math.min(6, years[1] - years[0] + 1)).filter(Number.isInteger);
+    svg.append("g").selectAll("text").data(xt).join("text").attr("x", (d) => x(d)).attr("y", h - 6).attr("text-anchor", "middle").text((d) => d);
+    if (state.mode === "trend") {
+      for (const yr of [state.start, state.end]) svg.append("line").attr("x1", x(yr)).attr("x2", x(yr)).attr("y1", mt).attr("y2", h - mb)
+        .style("stroke", "var(--muted)").attr("stroke-dasharray", "3 3");
+    }
+    const line = d3.line().x((r) => x(r[0])).y((r) => y(r[2]));
+    for (const s of series) {
+      svg.append("path").datum(s.rows).attr("d", line).style("fill", "none").style("stroke", s.color).attr("stroke-width", 2)
+        .attr("stroke-linejoin", "round").attr("stroke-linecap", "round");
+      svg.append("g").selectAll("circle").data(s.rows).join("circle").attr("cx", (r) => x(r[0])).attr("cy", (r) => y(r[2])).attr("r", 2.6)
+        .style("fill", (r) => (r[1] >= T.minN ? s.color : "var(--panel)")).style("stroke", s.color).attr("stroke-width", 1.2)
+        .append("title").text((r) => `${r[0]} 年 ${s.label}：${man(r[2])} 萬（${fmtN(r[1])} 筆）`);
+    }
+    // 線尾標籤放在右側；兩條線的終點太近時上下錯開，避免重疊
+    const ends = series.map((s) => {
+      const last = s.rows[s.rows.length - 1];
+      return { s, x: x(last[0]), y: y(last[2]), text: `${s.label.replace("價格", "")} ${man(last[2])}` };
+    }).sort((a, b) => a.y - b.y);
+    for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 13) ends[i].y = ends[i - 1].y + 13;
+    for (const e of ends) svg.append("text").attr("x", w - mr + 6).attr("y", e.y).attr("dy", "0.32em")
+      .style("fill", e.s.color).style("font-weight", 500).text(e.text);
+  }
+
+  function drawByAge(container, rows) {
+    const w = Math.max(260, panel.clientWidth - 30), bh = 16, gap = 6, ml = 58, mr = 90;
+    const h = rows.length * (bh + gap);
+    const x = d3.scaleLinear([0, d3.max(rows, (r) => r[2])], [ml, w - mr]);
+    const svg = d3.select(container).append("svg").attr("viewBox", `0 0 ${w} ${h}`);
+    const g = svg.selectAll("g").data(rows).join("g").attr("transform", (r, i) => `translate(0,${i * (bh + gap)})`);
+    g.append("text").attr("x", ml - 6).attr("y", bh / 2).attr("dy", "0.32em").attr("text-anchor", "end").text((r) => `${r[0]}年代`);
+    g.append("rect").attr("x", ml).attr("height", bh).attr("rx", 2).attr("width", (r) => Math.max(1, x(r[2]) - ml))
+      .style("fill", (r) => (r[1] >= T.minN ? "var(--accent)" : "var(--na)"));
+    g.append("text").attr("x", (r) => x(r[2]) + 6).attr("y", bh / 2).attr("dy", "0.32em").text((r) => `${man(r[2])} 萬（${fmtN(r[1])} 筆）`);
+  }
+
+  // ---- 排行 ----
+  function drawRank(color) {
+    const body = document.getElementById("rank-body");
+    body.replaceChildren();
+    document.getElementById("rank-title").textContent = {
+      trend: `${state.start} → ${state.end} 年 漲幅排行（${pts[state.pc].label}）`,
+      buy: `最新 4 季 ㎡ 單價排行（${pts[state.pc].label}，萬日圓／㎡）`,
+      invest: `${data.investWindow[0]}〜${data.investWindow[1]} 年 年成長率排行（取引價格）`,
+    }[state.mode];
+    document.getElementById("rank-col").textContent = { trend: "漲幅", buy: "中位數", invest: "年成長率" }[state.mode];
+    const rows = Object.keys(M).map((code) => ({ code, ...valueOf(code) }));
+    const ok = rows.filter((r) => r.status !== "insufficient").sort((a, b) => b.v - a.v);
+    const na = rows.filter((r) => r.status === "insufficient").sort((a, b) => a.code.localeCompare(b.code));
+    [...ok, ...na].forEach((r, i) => {
+      const tr = el("tr");
+      if (r.code === state.selected) tr.classList.add("selected");
+      if (r.status !== "ok") tr.classList.add("dim");
+      tr.append(el("td", null, r.status === "insufficient" ? "" : String(i + 1)));
+      const td = el("td");
+      const dot = el("span", "tm-dot");
+      dot.style.background = r.status === "insufficient" ? "var(--na)" : color(r.v);
+      const btn = el("button", null, nameOf(r.code, r.code));
+      btn.type = "button";
+      btn.addEventListener("click", () => select(r.code, true));
+      td.append(dot, btn);
+      tr.append(td);
+      if (r.status === "insufficient") tr.append(el("td", null, "樣本不足"), el("td", null, ""), el("td", null, String(r.n)));
+      else tr.append(
+        el("td", null, fmtValue(r.v) + (r.status === "uncertain" ? "？" : "")),
+        el("td", null, fmtRange(r.lo, r.hi)),
+        el("td", null, typeof r.n === "number" ? fmtN(r.n) : r.n),
+      );
+      body.append(tr);
+    });
+  }
+
+  // ---- 控制項 ----
+  function fillYears() {
+    const ys = pts[state.pc].completeYears;
+    if (!ys.includes(state.start) || !ys.includes(state.end) || state.start >= state.end) {
+      state.end = ys[ys.length - 1];
+      state.start = ys[Math.max(0, ys.length - 11)];
+    }
+    for (const [id, key] of [["year-start", "start"], ["year-end", "end"]]) {
+      const s = document.getElementById(id);
+      s.replaceChildren(...ys.map((y) => new Option(String(y), String(y))));
+      s.value = String(state[key]);
+    }
+    document.getElementById("year-start").querySelectorAll("option").forEach((o) => { o.disabled = +o.value >= state.end; });
+    document.getElementById("year-end").querySelectorAll("option").forEach((o) => { o.disabled = +o.value <= state.start; });
+  }
+
+  function syncControls() {
+    if (state.mode === "invest") state.pc = data.investPriceType;
+    document.querySelectorAll("[data-mode]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === state.mode)));
+    document.querySelectorAll("[data-pc]").forEach((b) => {
+      b.setAttribute("aria-pressed", String(b.dataset.pc === state.pc));
+      const hasData = !!pts[b.dataset.pc] && (state.mode !== "trend" || pts[b.dataset.pc].completeYears.length >= 2);
+      b.disabled = !hasData || (state.mode === "invest" && b.dataset.pc !== data.investPriceType);
+    });
+    document.getElementById("years-field").hidden = state.mode !== "trend";
+    if (state.mode === "trend") fillYears();
+    const e = document.getElementById("tm-explain");
+    e.textContent = {
+      trend: `${state.start} 年到 ${state.end} 年，年度 ㎡ 單價中位數漲了多少。紅色越深漲越多、藍色是下跌；斜線表示 95% 區間包含 0，看不出漲跌。`,
+      buy: `最新 4 季（${pts[state.pc].latestPeriod}）的 ㎡ 單價中位數。顏色越深越貴。`,
+      invest: `${data.investWindow[0]}〜${data.investWindow[1]} 年的長期趨勢：每年平均成長多少。只是把過去的走勢延伸來看，不是預測；斜線表示區間太寬、不確定。成約價格只有 2021 年以後的資料，所以只用取引價格。`,
+    }[state.mode];
+  }
+
+  function render() {
+    syncControls();
+    drawMap();
+    drawPanel();
+    drawRank(colorScale());
+  }
+
+  function select(code, scroll) {
+    state.selected = code;
+    drawMap();
+    drawPanel();
+    drawRank(colorScale());
+    if (scroll && window.matchMedia("(max-width: 860px)").matches) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  document.querySelectorAll("[data-mode]").forEach((b) => b.addEventListener("click", () => { state.mode = b.dataset.mode; render(); }));
+  document.querySelectorAll("[data-pc]").forEach((b) => b.addEventListener("click", () => { if (!b.disabled) { state.pc = b.dataset.pc; render(); } }));
+  document.getElementById("year-start").addEventListener("change", (e) => { state.start = +e.target.value; render(); });
+  document.getElementById("year-end").addEventListener("change", (e) => { state.end = +e.target.value; render(); });
+
+  // ---- 固定文字 ----
+  const totalLatest = d3.sum(Object.values(M), (m) => (m.latest["01"] ? m.latest["01"].n : 0));
+  document.getElementById("tm-source").textContent =
+    `國土交通省 不動産取引価格情報（取引價格 ${years01[0]}〜${years01[years01.length - 1]} 年、成約價格 ${pts["02"] ? pts["02"].completeYears[0] : "—"} 年起）・中古マンション等・${Object.keys(M).length} 個市區町村・最新 4 季取引 ${fmtN(totalLatest)} 筆・資料產生日 ${data.generated}`;
+  document.getElementById("note-thresholds").textContent =
+    `一年（或最新 4 季）少於 ${T.minN} 筆的區不上色（30 筆時中位數本身約有 ±13% 的誤差）。趨勢模式的漲幅 95% 區間包含 0、投資模式 ${T.investWindowYears} 年中達標年份少於 ${T.investMinYears} 年或區間寬度超過 ${(T.investMaxCiWidth * 100).toFixed(0)} 個百分點時，加上斜線。伊豆・小笠原的離島沒有畫出來。`;
+  document.getElementById("note-advice").textContent = data.text.notAdvice;
+  document.getElementById("note-disclaimer").textContent = data.text.disclaimer;
+  document.getElementById("note-credit").textContent = `邊界資料：${data.text.boundaryCredit}`;
+
+  render();
+  let lastW = mapEl.clientWidth;
+  new ResizeObserver(() => {
+    if (Math.abs(mapEl.clientWidth - lastW) > 4) { lastW = mapEl.clientWidth; drawMap(); drawPanel(); }
+  }).observe(mapEl);
+})();
+</script>
