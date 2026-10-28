@@ -12,7 +12,7 @@ from itertools import combinations
 from typing import Any
 
 from tokyo_housing_lab import DISCLAIMER
-from tokyo_housing_lab.analysis.municipalities import COMBINED, INVEST_PRICE_CLASSIFICATION, Analysis
+from tokyo_housing_lab.analysis.municipalities import COMBINED, HEDONIC, INVEST_PRICE_CLASSIFICATION, Analysis
 from tokyo_housing_lab.analysis.trend import (
     INVEST_MAX_CI_WIDTH,
     INVEST_MIN_YEARS,
@@ -23,8 +23,8 @@ from tokyo_housing_lab.analysis.trend import (
     Price,
 )
 
-PRICE_LABELS = {COMBINED: "綜合", "01": "取引價格", "02": "成約價格"}
-INVEST_PRICE_TYPES = [COMBINED, INVEST_PRICE_CLASSIFICATION]  # 成約價格不到 10 年，投資模式不能選
+PRICE_LABELS = {HEDONIC: "品質調整", COMBINED: "綜合", "01": "取引價格", "02": "成約價格"}
+INVEST_PRICE_TYPES = [HEDONIC, COMBINED, INVEST_PRICE_CLASSIFICATION]  # 成約價格不到 10 年，投資模式不能選
 BOUNDARY_CREDIT = (
     "「国土数値情報（行政区域データ）」（国土交通省）（https://nlftp.mlit.go.jp/ksj/）を加工して作成"
     "（スマートニュース メディア研究所 japan-topography の簡略化データを使用）"
@@ -60,15 +60,20 @@ def _invest(t: LongTrend | None) -> dict[str, Any] | None:
 def build_map_data(analysis: Analysis, generated: date) -> dict[str, Any]:
     """地圖要的全部數字。漲幅只放「兩年都達到樣本門檻」的組合，沒放的就是樣本不足。
 
-    價格種類除了 "01"／"02"，還有 "combined"（綜合：取引＋換算成取引水準的成約，以取引為主軸）。
+    價格種類除了 "01"／"02"，還有 "combined"（綜合：取引＋換算成取引水準的成約，以取引為主軸）
+    和 "hedonic"（品質調整：典型物件的價格，取引水準）。兩者的年份、最新 4 季都跟著取引。
     """
     years_of = dict(sorted(analysis.complete_years.items()))
-    has_combined = any(m.combined for m in analysis.municipalities.values())
-    if has_combined:
-        years_of = {COMBINED: years_of[INVEST_PRICE_CLASSIFICATION]} | years_of
+    derived = []
+    if analysis.hedonic is not None:
+        derived.append(HEDONIC)
+    if any(m.combined for m in analysis.municipalities.values()):
+        derived.append(COMBINED)
+    if derived:
+        years_of = {pc: years_of[INVEST_PRICE_CLASSIFICATION] for pc in derived} | years_of
     latest_of = dict(analysis.latest_period)
-    if has_combined and INVEST_PRICE_CLASSIFICATION in latest_of:
-        latest_of[COMBINED] = latest_of[INVEST_PRICE_CLASSIFICATION]
+    if INVEST_PRICE_CLASSIFICATION in latest_of:
+        latest_of |= {pc: latest_of[INVEST_PRICE_CLASSIFICATION] for pc in derived}
     price_types = {
         pc: {
             "label": PRICE_LABELS[pc],
@@ -94,6 +99,13 @@ def build_map_data(analysis: Analysis, generated: date) -> dict[str, Any]:
         yearly = {pc: [[y, s.n, round(s.median)] for y, s in sorted(ys.items())] for pc, ys in m.yearly.items()}
         latest = {pc: _price(p) for pc, p in m.latest.items()}
         invest = {INVEST_PRICE_CLASSIFICATION: _invest(m.invest)}
+        if m.hedonic:
+            h = m.hedonic
+            yearly[HEDONIC] = [[y, h.series.n[y], round(h.series.median(y))] for y in sorted(h.series.levels)]
+            latest[HEDONIC] = _price(h.latest)
+            invest[HEDONIC] = _invest(h.invest)
+        elif HEDONIC in years_of:
+            latest[HEDONIC] = _price(Price(None, None, None, 0, "insufficient"))
         offset = None
         if m.combined:
             c = m.combined
@@ -125,6 +137,12 @@ def build_map_data(analysis: Analysis, generated: date) -> dict[str, Any]:
         "generated": generated.isoformat(),
         "priceTypes": price_types,
         "investPriceTypes": [pc for pc in INVEST_PRICE_TYPES if pc in years_of],
+        "hedonic": None if analysis.hedonic is None else {
+            "standard": analysis.hedonic.standard,
+            "n": analysis.hedonic.n,
+            "outliers": analysis.hedonic.outliers,
+            "r2": round(analysis.hedonic.r2, 3),
+        },
         "investWindow": invest_window,
         "thresholds": {
             "minN": MIN_N,

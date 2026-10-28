@@ -24,6 +24,7 @@ from dataclasses import dataclass, fields
 import numpy as np
 import scipy.linalg
 import scipy.sparse as sp
+from scipy.sparse.csgraph import connected_components
 
 from tokyo_housing_lab.analysis.trend import (
     INVEST_WINDOW_YEARS,
@@ -39,6 +40,7 @@ from tokyo_housing_lab.analysis.trend import (
 MIN_DISTRICT_N = 10  # 筆數少於這個的町名，併進該區的「其他」
 OUTLIER_SIGMAS = 5.0
 OTHER_DISTRICT = "（其他）"
+ALL_DISTRICTS = "（全部）"
 SEIYAKU = "02"
 
 # 用途地域：常見的分開，其餘併成「其他」；基準是商業地域
@@ -195,6 +197,7 @@ class Design:
     seiyaku_cities: set[str]  # 取引、成約都夠多，才放成約的區
     big_districts: set[str]
     absorbed: set[str]  # 當成基準的欄位（分類變數在資料裡沒有原本的基準類別時，最常見的那一類）
+    pooled_cities: set[str]  # 町名全部併成一個的區（町名和期間分不開時）
 
 
 @dataclass
@@ -216,6 +219,17 @@ def _categorical(prefix: str, column: np.ndarray, group) -> _Block:
 def _continuous(name: str, values: np.ndarray) -> _Block:
     # 值是 0 的列不放：整欄都是 0 的欄位（例如資料裡沒有超過 90㎡ 的物件）就不會出現，也不會被當成共線
     return _Block([name], np.where(values != 0, 0, -1), values)
+
+
+def _disconnected_cities(district: np.ndarray, cp: np.ndarray, city: np.ndarray, n_district: int, n_cp: int) -> set[int]:
+    """町名和「區×期間」當成圖的點、每筆成交連一條線。某區的圖斷成好幾塊時（例如資料少的區，
+    每個町名只出現在某一期），各塊之間的時間變化分不開 → 回傳這些區，町名要全部併成一個。"""
+    edges = np.unique(np.stack([district, n_district + cp]), axis=1)
+    graph = sp.csr_matrix((np.ones(edges.shape[1]), (edges[0], edges[1])), shape=(n_district + n_cp,) * 2)
+    _, labels = connected_components(graph, directed=False)
+    pairs = np.unique(np.stack([city, labels[district]]), axis=1)
+    counts = np.bincount(pairs[0])
+    return set(np.nonzero(counts > 1)[0].tolist())
 
 
 def design_matrix(
@@ -249,17 +263,29 @@ def design_matrix(
         big, base_period = template.big_districts, template.base_period
         seiyaku_cities, seiyaku_base = template.seiyaku_cities, template.seiyaku_base_period
         usable = ~seiyaku | np.isin(cities, list(seiyaku_cities))[city_inv]
-    # 町名 → 整數編號（小町名併進該區的「其他」）；後面都用編號，不對 40 萬個字串排序
-    merged = [k if k in big else f"{k.split(' ', 1)[0]} {OTHER_DISTRICT}" for k in ukeys.tolist()]
-    district_levels = sorted(set(merged))
-    level_of = {nm: i for i, nm in enumerate(district_levels)}
-    district = np.array([level_of[nm] for nm in merged])[key_inv]
+    def district_codes(pooled: set[str]) -> tuple[list[str], np.ndarray]:
+        """町名 → 整數編號（小町名併進該區的「其他」）；後面都用編號，不對 40 萬個字串排序。"""
+        merged = []
+        for k in ukeys.tolist():
+            c = k.split(" ", 1)[0]
+            merged.append(f"{c} {ALL_DISTRICTS}" if c in pooled else k if k in big else f"{c} {OTHER_DISTRICT}")
+        levels = sorted(set(merged))
+        level_of = {nm: i for i, nm in enumerate(levels)}
+        return levels, np.array([level_of[nm] for nm in merged])[key_inv]
+
+    pooled = set() if template is None else template.pooled_cities
+    district_levels, district = district_codes(pooled)
 
     # 時間：區 × 期間（各區的基準期間不放）
     pmin = int(period.min())
     span = int(period.max()) - pmin + 1
     cp_codes = city_inv * span + (period - pmin)
     ucp, cp_inv = np.unique(cp_codes, return_inverse=True)
+    if template is None:
+        pooled = _disconnected_cities(district[usable], cp_inv[usable], city_inv[usable], len(district_levels), len(ucp))
+        pooled = {cities[i] for i in pooled}
+        if pooled:
+            district_levels, district = district_codes(pooled)
     cp_names = []
     for code in ucp.tolist():
         c, p = cities[code // span], code % span + pmin
@@ -331,7 +357,7 @@ def design_matrix(
     clusters = (np.cumsum(used) - 1)[district[keep]]
     design = Design(
         X, names, index, clusters, city[keep], period[keep], seiyaku[keep],
-        base_period, seiyaku_base, seiyaku_cities, big, absorbed,
+        base_period, seiyaku_base, seiyaku_cities, big, absorbed, pooled,
     )  # fmt: skip
     return design, keep
 
@@ -524,3 +550,55 @@ def hedonic_price(series: HedonicSeries | None, period: int) -> Price:
     if n < MIN_N:
         return Price(None, None, None, n, "insufficient")
     return price_from_log(series.levels[period], series.level_se[period], n)
+
+
+# ---- 報告用 ----
+
+
+def building_effect(model: Model, area: float, age: float) -> float:
+    """面積、屋齡的效果（ln）；和典型物件比：building_effect(m, a, g) − building_effect(m, 55, 17)。"""
+    terms = building_terms(np.array([float(area)]), np.array([float(age)]), model.spec)
+    return sum(model.coef(name)[0] * v[0] for name, v in terms.items())
+
+
+@dataclass(frozen=True)
+class Validation:
+    """隨機留一部分不參加估計，拿來預測；和「同町名、同期間的中位數」比。誤差都是 |ln 預測 − ln 實際|。"""
+
+    n_train: int
+    n_test: int
+    unpredictable: int  # 驗證資料裡模型沒見過的町名、類別、期間
+    model_median_error: float  # exp(誤差中位數) − 1
+    model_within: dict[float, float]  # 誤差在 ±x 以內的比例
+    baseline_median_error: float
+    baseline_within: dict[float, float]
+
+
+def validate_holdout(sample: Sample, period: np.ndarray, frac: float = 0.1, seed: int = 0, spec: Spec = Spec()) -> Validation:
+    test = np.random.default_rng(seed).random(len(sample)) < frac
+    train, held = sample.subset(~test), sample.subset(test)
+    model = fit_hedonic(train, period[~test], spec)
+    pred, ok = predict(model, held, period[test])
+    actual = held.log_price[ok]
+    # 基準：訓練資料裡同町名、同期間的中位數（沒有就用同區、同期間）
+    tp, hp = period[~test], period[test][ok]
+    med: dict[tuple, float] = {}
+    for keys in (lambda s, p: zip(s.city.tolist(), s.district.tolist(), p.tolist(), strict=True),
+                 lambda s, p: zip(s.city.tolist(), p.tolist(), strict=True)):  # fmt: skip
+        groups: dict[tuple, list[float]] = {}
+        for k, v in zip(keys(train, tp), train.log_price.tolist(), strict=True):
+            groups.setdefault(k, []).append(v)
+        med |= {k: float(np.median(v)) for k, v in groups.items()}
+    h = held.subset(ok)
+    base = np.array([
+        med.get((c, d, p), med.get((c, p), np.nan))
+        for c, d, p in zip(h.city.tolist(), h.district.tolist(), hp.tolist(), strict=True)
+    ])  # fmt: skip
+
+    def summary(err: np.ndarray) -> tuple[float, dict[float, float]]:
+        err = np.abs(err[~np.isnan(err)])
+        return math.exp(float(np.median(err))) - 1, {x: float(np.mean(err < math.log(1 + x))) for x in (0.1, 0.2)}
+
+    m_med, m_within = summary(pred - actual)
+    b_med, b_within = summary(base - actual)
+    return Validation(int((~test).sum()), int(ok.sum()), int((~ok).sum()), m_med, m_within, b_med, b_within)

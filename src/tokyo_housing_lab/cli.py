@@ -4,19 +4,24 @@
   load ：只讀 data/raw/，清理後寫進 DuckDB（不打 API）
   query：每季 ㎡ 單價中位數與筆數（只讀 DuckDB）
   analyze：各市區町村的排行（購買／趨勢／投資模式，只讀 DuckDB）
+  hedonic：品質調整指數的模型診斷（係數、配適度、驗證；只讀 DuckDB）
   map  ：產生地圖 HTML（只讀 DuckDB）
 """
 
 import argparse
 import logging
+import math
 import re
 import sys
 from collections import Counter
 from datetime import date
 from pathlib import Path
 
+import numpy as np
+
 from tokyo_housing_lab import DISCLAIMER
-from tokyo_housing_lab.analysis.municipalities import COMBINED, INVEST_PRICE_CLASSIFICATION, build_analysis
+from tokyo_housing_lab.analysis import hedonic as hd
+from tokyo_housing_lab.analysis.municipalities import COMBINED, HEDONIC, INVEST_PRICE_CLASSIFICATION, build_analysis
 from tokyo_housing_lab.analysis.trend import MIN_N
 from tokyo_housing_lab.config import MissingApiKeyError, load_api_key
 from tokyo_housing_lab.pipeline import DEFAULT_DB_PATH, DEFAULT_RAW_DIR, load_raw_dir
@@ -108,19 +113,26 @@ def _pct(x: float) -> str:
 def _analyze(args: argparse.Namespace) -> None:
     if not args.db.is_file():
         raise FileNotFoundError(f"找不到資料庫 {args.db}，請先執行 load")
-    with DuckDBStore(args.db) as store:
-        a = build_analysis(store, args.region)
     pc = args.price
-    label = "綜合（取引＋換算後的成約，取引水準）" if pc == COMBINED else f"{PRICE_LABELS[pc]}價格"
-    # 綜合的年份、最新 4 季期間都跟著取引
-    base_pc = INVEST_PRICE_CLASSIFICATION if pc == COMBINED else pc
+    with DuckDBStore(args.db) as store:
+        a = build_analysis(store, args.region, with_hedonic=pc == HEDONIC)  # 品質調整要估模型（十幾秒），用到才估
+    if pc == HEDONIC and a.hedonic is None:
+        raise ValueError("這個範圍的資料估不出品質調整指數（資料太少或欄位共線，詳見 warning）")
+    label = {
+        COMBINED: "綜合（取引＋換算後的成約，取引水準）",
+        HEDONIC: f"品質調整（典型物件 {a.hedonic.standard}，取引水準）" if a.hedonic else "",
+    }.get(pc) or f"{PRICE_LABELS[pc]}價格"
+    # 綜合、品質調整的年份、最新 4 季期間都跟著取引
+    base_pc = INVEST_PRICE_CLASSIFICATION if pc in (COMBINED, HEDONIC) else pc
+    latest_of = {COMBINED: lambda m: m.combined and m.combined.latest, HEDONIC: lambda m: m.hedonic and m.hedonic.latest}
     munis = list(a.municipalities.values())
     insufficient: list[str] = []
 
     if args.mode == "buy":
         y1, q1, y2, q2 = a.latest_period[base_pc]
         print(f"購買模式：{label}，{y1}Q{q1}〜{y2}Q{q2} 的 ㎡ 單價中位數（萬日圓／㎡）")
-        rows = [(m, m.combined.latest if pc == COMBINED else m.latest[pc]) for m in munis if pc != COMBINED or m.combined]
+        rows = [(m, latest_of[pc](m) if pc in latest_of else m.latest[pc]) for m in munis]
+        rows = [(m, p) for m, p in rows if p]
         for m, p in sorted(rows, key=lambda r: -(r[1].median or 0)):
             if p.status == "insufficient":
                 insufficient.append(f"{m.name}({p.n})")
@@ -144,9 +156,12 @@ def _analyze(args: argparse.Namespace) -> None:
                 f"  {m.name:<10}{_pct(g.total):>8}  （每年 {_pct(g.annual)}，95% {_pct(g.ci_low)}〜{_pct(g.ci_high)}）{mark}"
             )
     else:
-        if pc not in (INVEST_PRICE_CLASSIFICATION, COMBINED):
-            raise ValueError("投資模式只能用取引價格（01）或綜合（combined）：成約價格不到 10 年")
-        trend_of = (lambda m: m.combined and m.combined.invest) if pc == COMBINED else (lambda m: m.invest)
+        if pc == "02":
+            raise ValueError("投資模式只能用取引價格（01）、綜合（combined）或品質調整（hedonic）：成約價格不到 10 年")
+        trend_of = {
+            COMBINED: lambda m: m.combined and m.combined.invest,
+            HEDONIC: lambda m: m.hedonic and m.hedonic.invest,
+        }.get(pc, lambda m: m.invest)
         rows = [(m, trend_of(m)) for m in munis if trend_of(m)]
         t0 = rows[0][1]
         print(f"投資模式：{label}，{t0.first_year}〜{t0.last_year} 年的長期趨勢（年成長率）")
@@ -161,6 +176,47 @@ def _analyze(args: argparse.Namespace) -> None:
             )
     if insufficient:
         print(f"  樣本不足（每年未滿 {MIN_N} 筆）：{'、'.join(insufficient)}")
+    print()
+    print(NOT_ADVICE)
+    print(DISCLAIMER)
+
+
+def _hedonic(args: argparse.Namespace) -> None:
+    if not args.db.is_file():
+        raise FileNotFoundError(f"找不到資料庫 {args.db}，請先執行 load")
+    with DuckDBStore(args.db) as store:
+        years = [r["year"] for r in store.query("complete_years") if r["price_classification"] == INVEST_PRICE_CLASSIFICATION]
+        sample = hd.Sample.from_columns(store.query_columns("hedonic_sample", region=args.region))
+    if not years:
+        raise ValueError("沒有取引價格的完整年，無法估計")
+    sample = sample.subset(np.isin(sample.year, years))
+    period = hd.yearly_period(sample)
+    m = hd.fit_hedonic(sample, period)
+    f = m.fit
+    print(f"品質調整指數（hedonic 迴歸）：{years[0]}〜{years[-1]} 年，{f.n:,} 筆成交（極端值 {m.outliers:,} 筆不用）")
+    print(f"  R² {f.r2:.3f}、殘差 σ {f.sigma:.3f}、參數 {len(m.design.names):,} 個、町名 cluster {f.clusters:,} 個")
+    if m.design.pooled_cities:
+        print(f"  町名和期間分不開、町名合併成一個的區：{'、'.join(sorted(m.design.pooled_cities))}")
+    print(f"典型物件：{m.spec.standard_label()}")
+    base = hd.building_effect(m, m.spec.standard_area, m.spec.standard_age)
+    ages = "、".join(f"{a} 年 {_pct(math.exp(hd.building_effect(m, m.spec.standard_area, a) - base) - 1)}" for a in (0, 5, 10, 20, 30, 40, 50))
+    areas = "、".join(f"{a}㎡ {_pct(math.exp(hd.building_effect(m, a, m.spec.standard_age) - base) - 1)}" for a in (20, 25, 40, 70, 90, 120))
+    print(f"  屋齡（和 {m.spec.standard_age:g} 年比）：{ages}")
+    print(f"  面積（和 {m.spec.standard_area:g}㎡ 比，每㎡）：{areas}")
+    print("係數（和基準類別比；95% 區間）：")
+    for name in m.design.names:
+        if name.startswith(("舊耐震", "房型:", "構造:", "改裝:", "成約×時間:")):
+            b, se = m.coef(name)
+            print(f"  {name:<14}{_pct(math.exp(b) - 1):>8}  （{_pct(math.exp(b - 1.96 * se) - 1)}〜{_pct(math.exp(b + 1.96 * se) - 1)}）")
+    gaps = sorted(math.exp(m.coef(n)[0]) - 1 for n in m.design.names if n.startswith("成約:"))
+    if gaps:
+        print(f"  成約（和取引比，各區）：中位數 {_pct(gaps[len(gaps) // 2])}（{_pct(gaps[0])}〜{_pct(gaps[-1])}，{len(gaps)} 區）")
+    if args.validate:
+        v = hd.validate_holdout(sample, period)
+        print(f"驗證（隨機留 10% 不參加估計：{v.n_test:,} 筆，無法預測 {v.unpredictable} 筆）：")
+        for label, med, within in (("品質調整模型", v.model_median_error, v.model_within),
+                                   ("同町名同年的中位數", v.baseline_median_error, v.baseline_within)):  # fmt: skip
+            print(f"  {label:<10} 誤差中位數 {med:.1%}、±10% 以內 {within[0.1]:.1%}、±20% 以內 {within[0.2]:.1%}")
     print()
     print(NOT_ADVICE)
     print(DISCLAIMER)
@@ -217,15 +273,22 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("mode", choices=["buy", "trend", "invest"], help="buy＝最新價格、trend＝起訖年漲幅、invest＝長期趨勢")
     analyze.add_argument(
         "--price",
-        choices=["01", "02", COMBINED],
+        choices=["01", "02", COMBINED, HEDONIC],
         default="01",
-        help="01＝取引價格（預設）、02＝成約價格、combined＝綜合（取引＋換算成取引水準的成約）",
+        help="01＝取引價格（預設）、02＝成約價格、combined＝綜合（取引＋換算成取引水準的成約）、"
+        "hedonic＝品質調整（典型物件的價格，要估模型，十幾秒）",
     )
     analyze.add_argument("--from", dest="start", type=int, help="趨勢模式的起年（預設：最新完整年的 10 年前）")
     analyze.add_argument("--to", dest="end", type=int, help="趨勢模式的迄年（預設：最新的完整年）")
     analyze.add_argument("--region", default=TOKYO)
     analyze.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     analyze.set_defaults(handler=_analyze)
+
+    hed = sub.add_parser("hedonic", help="品質調整指數的模型診斷：係數、配適度、驗證", epilog=DISCLAIMER)
+    hed.add_argument("--validate", action="store_true", help="另外隨機留 10%% 驗證預測誤差（再估一次模型）")
+    hed.add_argument("--region", default=TOKYO)
+    hed.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    hed.set_defaults(handler=_hedonic)
 
     map_ = sub.add_parser("map", help="產生地圖 HTML（趨勢／購買／投資模式）", epilog=DISCLAIMER)
     map_.add_argument("--out", type=Path, default=DEFAULT_MAP_PATH, help=f"輸出位置（預設 {DEFAULT_MAP_PATH}）")

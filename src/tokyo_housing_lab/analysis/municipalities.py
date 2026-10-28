@@ -30,6 +30,7 @@ HEDONIC = "hedonic"  # 品質調整指數（hedonic 迴歸），當成第四種�
 INVEST_PRICE_CLASSIFICATION = "01"  # 投資模式只用取引價格：成約價格 2021 年才開始，不夠 10 年
 logger = logging.getLogger(__name__)
 
+HEDONIC_LATEST_WINDOWS = 11  # 購買模式的品質調整價格：用最近幾個 4 季窗口的資料估
 AGE_BREAKDOWN_YEARS = 5  # 詳細面板的建築年代別中位數：最新完整年往前看幾年
 
 
@@ -121,9 +122,11 @@ def _add_hedonic(
         series = hd.index_series(model)
         latest_series: dict[str, hd.HedonicSeries] = {}
         if latest:
-            # 同樣從第一個完整年開始，地點組成才和年度模型一致；期間改成「以最新一季為終點的每 4 季」
-            recent = sample.subset(sample.year >= min(years))
-            window = hd.fit_hedonic(recent, hd.window_period(recent, latest[2], latest[3]))
+            # 期間改成「以最新一季為終點的每 4 季」，和中位數的最新 4 季對齊。
+            # 只用最近 HEDONIC_LATEST_WINDOWS 個窗口：估計時間少一半，地點組成也比較接近現在的成交
+            periods = hd.window_period(sample, latest[2], latest[3])
+            recent = periods > -HEDONIC_LATEST_WINDOWS
+            window = hd.fit_hedonic(sample.subset(recent), periods[recent])
             latest_series = hd.index_series(window)
     except ValueError as e:  # 資料太少、欄位共線：不做品質調整，其他指標照常
         logger.warning("無法估計品質調整指數：%s", e)

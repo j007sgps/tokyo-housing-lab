@@ -103,6 +103,7 @@ class DuckDBStore:
         if isinstance(path, Path):
             path.parent.mkdir(parents=True, exist_ok=True)
         self.con = duckdb.connect(str(path))
+        self.con.execute("SET enable_progress_bar = false")  # 長查詢的進度條會混進 CLI 的輸出
         self._create("transactions", TRANSACTION_COLUMNS, ',\n  PRIMARY KEY ("raw_file", "row_index")')
         self._create("fetch_log", _FETCH_LOG_COLUMNS)
 

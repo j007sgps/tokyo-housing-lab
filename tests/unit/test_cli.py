@@ -190,3 +190,37 @@ def test_map_fragment(analysis_db, tmp_path):
 def test_map_without_db(tmp_path, capsys):
     assert cli.main(["map", "--db", str(tmp_path / "none.duckdb"), "--out", str(tmp_path / "x.html")]) == 1
     assert not (tmp_path / "x.html").exists()
+
+
+# --- 品質調整 ---
+
+
+@pytest.fixture(scope="module")
+def hedonic_db(tmp_path_factory):
+    from test_municipalities import build_hedonic_db
+
+    return build_hedonic_db(tmp_path_factory.mktemp("h") / "h.duckdb")
+
+
+@pytest.mark.parametrize("mode", ["buy", "trend", "invest"])
+def test_analyze_hedonic(hedonic_db, capsys, mode):
+    assert cli.main(["analyze", mode, "--price", "hedonic", "--db", str(hedonic_db)]) == 0
+    out = capsys.readouterr().out
+    assert "品質調整（典型物件 55㎡" in out
+    assert "新宿区" in out
+    assert out.rstrip().endswith(DISCLAIMER)
+
+
+def test_analyze_hedonic_not_estimable(analysis_db, capsys):
+    # 合成資料面積全是 50㎡：估不出來 → 錯誤訊息，不是 traceback
+    assert cli.main(["analyze", "trend", "--price", "hedonic", "--db", str(analysis_db)]) == 1
+    assert "估不出品質調整指數" in capsys.readouterr().err
+
+
+def test_hedonic_command(hedonic_db, capsys):
+    assert cli.main(["hedonic", "--validate", "--db", str(hedonic_db)]) == 0
+    out = capsys.readouterr().out
+    assert "2010〜2013 年" in out and "R²" in out
+    assert "屋齡（和 17 年比）" in out and "成約（和取引比" in out
+    assert "品質調整模型" in out and "同町名同年的中位數" in out
+    assert "不是投資建議" in out and out.rstrip().endswith(DISCLAIMER)

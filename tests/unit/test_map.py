@@ -155,3 +155,31 @@ def test_script_tag_in_data_cannot_break_out(analysis):
 def test_d3_is_pinned(analysis):
     html = render_html(analysis, GENERATED)
     assert re.search(r'src="https://cdnjs\.cloudflare\.com/ajax/libs/d3/\d+\.\d+\.\d+/d3\.min\.js"', html)
+
+
+def test_hedonic_in_map_data(tmp_path):
+    from test_municipalities import build_hedonic_db
+
+    from tokyo_housing_lab.analysis.municipalities import HEDONIC
+
+    with DuckDBStore(build_hedonic_db(tmp_path / "h.duckdb")) as s:
+        a = build_analysis(s)
+    d = build_map_data(a, GENERATED)
+    assert list(d["priceTypes"]) == ["hedonic", "combined", "01", "02"]
+    assert d["priceTypes"]["hedonic"]["label"] == "品質調整"
+    assert d["priceTypes"]["hedonic"]["completeYears"] == [2010, 2011, 2012, 2013]
+    assert d["investPriceTypes"] == ["hedonic", "combined", "01"]
+    assert d["hedonic"]["standard"].startswith("55㎡") and d["hedonic"]["r2"] > 0.9
+    m = d["municipalities"]["13104"]
+    g = a.growth("13104", HEDONIC, 2010, 2013)
+    assert m["growth"]["hedonic"]["2010-2013"] == [round(g.total, 4), round(g.ci_low, 4), round(g.ci_high, 4), int(g.status == "uncertain")]
+    assert m["latest"]["hedonic"]["status"] == "ok"
+    assert [r[0] for r in m["yearly"]["hedonic"]] == [2010, 2011, 2012, 2013]
+    assert set(m["invest"]) == {"01", "combined", "hedonic"}
+
+
+def test_map_without_hedonic(analysis):
+    # 估不出品質調整（合成資料面積全是 50㎡）：沒有這個價格種類，其他照常
+    d = build_map_data(analysis, GENERATED)
+    assert "hedonic" not in d["priceTypes"] and d["hedonic"] is None
+    assert d["investPriceTypes"] == ["combined", "01"]

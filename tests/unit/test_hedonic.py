@@ -9,6 +9,7 @@ from tokyo_housing_lab.analysis.hedonic import (
     OTHER_DISTRICT,
     Sample,
     Spec,
+    building_effect,
     city_planning_group,
     design_matrix,
     far_group,
@@ -22,6 +23,7 @@ from tokyo_housing_lab.analysis.hedonic import (
     predict,
     renovation_group,
     structure_group,
+    validate_holdout,
     window_period,
     yearly_period,
 )
@@ -346,3 +348,37 @@ def test_all_zero_continuous_column_is_left_out(exact_model):
     assert "ln面積>90" not in m.design.index
     pred, keep = predict(m, small, yearly_period(small))
     assert keep.all() and pred == pytest.approx(small.log_price, abs=1e-9)
+
+
+def test_disconnected_city_pools_its_districts():
+    # 新區：甲地只在 2010 年、乙地只在 2013 年 → 時間變化和町名差異分不開 → 町名全部併成一個
+    s = make_sample(np.random.default_rng(8), noise=0.05)  # 有雜訊：完全沒雜訊時 σ ≈ 0，新加的列都會被當成離群值
+    extra = s.subset(np.arange(40))
+    extra.city = np.array(["13303"] * 40, dtype=object)
+    extra.year = np.array([2010] * 20 + [2013] * 20)
+    extra.district = np.array(["甲地"] * 20 + ["乙地"] * 20, dtype=object)
+    extra.price_classification = np.array(["01"] * 40, dtype=object)
+    both = Sample(**{k: np.concatenate([getattr(s, k), getattr(extra, k)]) for k in s.__dataclass_fields__})
+    m = fit_hedonic(both, yearly_period(both))
+    assert m.design.pooled_cities == {"13303"}
+    assert "町名:13303 （全部）" in m.design.index and "時間:13303:2013" in m.design.index
+    assert "町名:13101 甲町" in m.design.index  # 其他區不受影響
+    _, keep = predict(m, both, yearly_period(both))
+    assert keep.all()
+
+
+def test_building_effect_relative_to_standard(exact_model):
+    _, m = exact_model
+    assert building_effect(m, 55, 17) - building_effect(m, 55, 17) == 0
+    assert building_effect(m, 55, 30) - building_effect(m, 55, 17) == pytest.approx(true_building(55, 30) - true_building(55, 17), abs=1e-9)
+    assert building_effect(m, 25, 17) - building_effect(m, 55, 17) == pytest.approx(true_building(25, 17) - true_building(55, 17), abs=1e-9)
+
+
+def test_validate_holdout_beats_district_median():
+    # 每個町名×年的物件組成差很多（面積、屋齡隨機）→ 模型應該比單純的中位數準
+    s = make_sample(np.random.default_rng(9), n_per=150, noise=0.05)
+    v = validate_holdout(s, yearly_period(s), frac=0.2, seed=1)
+    assert v.n_train + v.n_test + v.unpredictable == len(s)
+    assert 0 < v.model_median_error < v.baseline_median_error
+    assert v.model_within[0.1] > v.baseline_within[0.1]
+    assert v.model_median_error == pytest.approx(math.exp(0.05 * 0.6745) - 1, rel=0.3)  # 常態誤差的 |e| 中位數 ≈ 0.674σ
