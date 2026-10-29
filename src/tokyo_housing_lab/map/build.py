@@ -18,6 +18,7 @@ import numpy as np
 from tokyo_housing_lab import DISCLAIMER
 from tokyo_housing_lab.analysis.estimate import AGE_BANDS, KU_MAX, PLAN_GROUPS, Estimator, group_label
 from tokyo_housing_lab.analysis.hazards import STATION_RADIUS_M, THRESHOLDS, HazardAnalysis
+from tokyo_housing_lab.analysis.hedonic import Spec
 from tokyo_housing_lab.analysis.municipalities import COMBINED, HEDONIC, INVEST_PRICE_CLASSIFICATION, Analysis
 from tokyo_housing_lab.analysis.stations import StationAnalysis, line_label, operator_label
 from tokyo_housing_lab.processing.png import palette_png
@@ -248,6 +249,8 @@ def build_map_data(
 
     return {
         "generated": generated.isoformat(),
+        "i18n": _i18n(),
+        "standard": {"area": Spec.standard_area, "age": Spec.standard_age},  # 典型物件（畫面的文字依語言組）
         "priceTypes": price_types,
         "investPriceTypes": [pc for pc in INVEST_PRICE_TYPES if pc in years_of],
         "hedonic": None if analysis.hedonic is None else {
@@ -369,6 +372,11 @@ def build_estimate_data(est: Estimator) -> dict[str, Any]:
         "coverage": {k: [_r(v, 3) for _, v in sorted(c.items())] for k, c in est.coverage.items()},
         "coverageN": est.coverage_n,
     }
+
+
+def _i18n() -> dict[str, Any]:
+    """地圖的文字：zh（中文）、mix（中文＋日文用語）、ja（日本語），以及 zh 的名字換字形表（hant）。"""
+    return json.loads(files("tokyo_housing_lab.map").joinpath("i18n.json").read_text(encoding="utf-8"))
 
 
 def _boundaries() -> dict[str, Any]:

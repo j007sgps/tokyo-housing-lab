@@ -376,3 +376,47 @@ def test_estimate_data_structure(estimator_and_window, analysis):
     assert set(e["plans"]) == {"2LDK", "1LDK", "3LDK"} and e["plans"]["2LDK"] == 0
     assert e["structures"] == {"RC": 0.0} and "全部" in e["coverage"]
     assert build_map_data(analysis, GENERATED)["estimate"] is None
+
+
+# --- 多語言 ---
+
+
+def i18n():
+    return json.loads(files("tokyo_housing_lab.map").joinpath("i18n.json").read_text(encoding="utf-8"))
+
+
+def template_keys():
+    t = files("tokyo_housing_lab.map").joinpath("template.html").read_text(encoding="utf-8")
+    static = set(re.findall(r'tx\("([^"]+)"', t)) | set(re.findall(r'data-i18n(?:-html|-aria)?="([^"]+)"', t))
+    # 動態的鍵（tx(`pc.${pc}`) 這種）：前綴 × 會出現的值
+    dynamic = {f"{p}.{v}" for p in ("pc", "pcLong", "pcRow", "pcShort") for v in ("hedonic", "combined", "01", "02")}
+    dynamic |= {f"layer.{k}" for k in ("flood", "surge", "elementary", "junior")} | {f"depth.{i}" for i in range(6)}
+    dynamic |= {f"rank.col.{m}" for m in ("trend", "buy", "invest")} | {"est.level.01", "est.level.02"}
+    dynamic |= {"off.cheaper", "off.dearer", "region.ku", "region.tama"}
+    return static | dynamic
+
+
+def test_i18n_has_every_key_the_template_uses():
+    d = i18n()
+    assert set(d) == {"mix", "zh", "ja", "hant"}
+    assert template_keys() <= set(d["mix"])
+    assert set(d["mix"]) <= template_keys()  # 沒有用不到的鍵
+    for lang in ("zh", "ja"):
+        assert set(d[lang]) == set(d["mix"]), lang  # 三種語言的鍵完全相同
+    assert all(len(k) == 1 and len(v) == 1 and k != v for k, v in d["hant"].items())  # 一個字換一個字
+
+
+def test_i18n_placeholders_match():
+    d = i18n()
+    def holes(s):
+        return sorted(re.findall(r"\{(\w+)\}", s))
+
+    for lang in ("zh", "ja"):
+        for k, v in d[lang].items():
+            assert holes(v) == holes(d["mix"][k]), (lang, k)
+
+
+def test_i18n_is_embedded(analysis):
+    data = build_map_data(analysis, GENERATED)
+    assert data["i18n"]["mix"]["title"] == "東京中古マンション地図"
+    assert data["standard"] == {"area": 55, "age": 17}

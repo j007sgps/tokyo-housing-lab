@@ -235,6 +235,44 @@ uv run python -c "import duckdb; print(duckdb.connect('data/tokyo_housing_lab.du
 
 欄位的實際觀察與清理規則的依據：`docs/xit001_fields.md`
 
+## 部署（Vercel）
+
+地圖公開在 https://tokyo-housing-lab.vercel.app （Vercel 專案 `tokyo-housing-lab`，Hobby 方案）。
+
+- 內容來自 git 的 **`vercel-site` 分支**：沒有歷史的獨立分支，只放 3 個靜態檔，原始碼不在裡面
+  - `index.html`：`tokyo-housing-lab map` 產生的單檔地圖，`<head>` 加上 `<meta name="robots" content="noindex, nofollow">`
+  - `robots.txt`：`User-agent: *` ／ `Disallow: /`
+  - `vercel.json`：所有回應加上 `X-Robots-Tag: noindex, nofollow` 標頭
+  - 三層都是請搜尋引擎不要收錄（正規的搜尋引擎會遵守，但擋不了不守規矩的爬蟲）；知道網址的人都看得到
+- Vercel 專案**沒有連 GitHub 自動部署**：連了之後，每個分支的 push 都會建立預覽部署，可能把 repo 的原始碼放到網路上。
+  所以每次更新都要手動建立部署
+- 資料庫和原始資料不在 git 裡（`data/` 不進版控），Vercel 沒辦法自己重建地圖：資料更新後要重新產生地圖、再部署一次
+
+更新步驟：
+
+```bash
+# 1. 重新產生地圖（要先 fetch／load 好）
+uv run tokyo-housing-lab map --out /tmp/site/index.html
+
+# 2. 加上 noindex（放在 <meta name="viewport" 前面）
+python3 -c "
+import pathlib; p = pathlib.Path('/tmp/site/index.html'); s = p.read_text(encoding='utf-8')
+p.write_text(s.replace('<meta name=\"viewport\"', '<meta name=\"robots\" content=\"noindex, nofollow\">\n<meta name=\"viewport\"', 1), encoding='utf-8')"
+
+# 3. commit 到 vercel-site 分支（另開一個 worktree，不影響手上的分支）
+git fetch origin vercel-site
+git worktree add /tmp/vercel-site origin/vercel-site
+cd /tmp/vercel-site && git switch -C vercel-site origin/vercel-site
+cp /tmp/site/index.html . && git add index.html && git commit -m "部署用：更新地圖" && git push origin vercel-site
+cd - && git worktree remove /tmp/vercel-site
+```
+
+4. 建立 production 部署：Vercel 的 dashboard → 專案 `tokyo-housing-lab` → Deployments → Create Deployment，
+   選 GitHub 的 `j007sgps/CloudDeveloper`、分支 `vercel-site`；或用 Vercel API 的 create deployment
+   （`gitSource: {type: "github", org: "j007sgps", repo: "CloudDeveloper", ref: "vercel-site"}`、`target: "production"`）。
+   專案設定是 Framework 「Other」、不建置（Build／Install Command 空白、Output Directory `.`）
+5. 用無痕視窗打開 https://tokyo-housing-lab.vercel.app 確認看得到
+
 ## 測試
 
 ```bash
