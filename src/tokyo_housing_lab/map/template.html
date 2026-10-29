@@ -118,6 +118,21 @@
   .tm-rank tr.selected td { background: color-mix(in srgb, var(--accent) 14%, transparent); }
   .tm-rank tr.dim td { color: var(--muted); }
   .tm-dot { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .tm-est-form { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: end; }
+  .tm-est-form input[type="number"] { font: inherit; font-size: .9rem; color: var(--fg); background: var(--panel); border: 1px solid var(--line);
+                                     border-radius: 8px; padding: 5px 8px; width: 6.5em; }
+  .tm-est-form input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .tm-check { display: inline-flex; align-items: center; gap: 6px; font-size: .9rem; padding-bottom: 6px; cursor: pointer; }
+  .tm-est-result { margin-top: 12px; }
+  .tm-est-result td { vertical-align: top; }
+  .tm-est-result td b { font-size: 1.05rem; font-weight: 700; white-space: nowrap; }
+  .tm-est-result td small { display: block; color: var(--muted); font-size: .78rem; white-space: nowrap; }
+  .tm-est-result td:first-child { white-space: nowrap; }
+  @media (max-width: 600px) {
+    .tm-est-result .tm-kv th, .tm-est-result .tm-kv td { padding: 4px 3px; }
+    .tm-est-result td b { font-size: .88rem; }
+    .tm-est-result td small { font-size: .7rem; }
+  }
   .tm-notes { color: var(--muted); font-size: .8rem; display: flex; flex-direction: column; gap: 6px; }
   .tm-notes p { margin: 0; max-width: 90ch; }
   .tm-notes strong { color: var(--fg); font-weight: 500; }
@@ -197,6 +212,22 @@
     <aside class="tm-card tm-panel" id="panel" aria-live="polite"></aside>
   </div>
 
+  <section class="tm-card" id="est-card" aria-label="估價" hidden>
+    <h3>估價：現在同樣條件的物件，成交價會落在哪裡</h3>
+    <div class="tm-est-form">
+      <label class="tm-field"><span class="tm-label">市區町村</span><select id="est-city"></select></label>
+      <label class="tm-field"><span class="tm-label">町名</span><select id="est-district"></select></label>
+      <label class="tm-field"><span class="tm-label">面積（㎡）</span><input id="est-area" type="number" min="10" max="300" step="0.5" value="60" inputmode="decimal"></label>
+      <label class="tm-field"><span class="tm-label">建築年（西元）</span><input id="est-built" type="number" min="1950" step="1" inputmode="numeric"></label>
+      <label class="tm-field"><span class="tm-label">房型</span><select id="est-plan"></select></label>
+      <label class="tm-check"><input id="est-plus-s" type="checkbox">＋S（納戶）</label>
+      <label class="tm-field"><span class="tm-label">構造</span><select id="est-structure"></select></label>
+      <label class="tm-check"><input id="est-renovated" type="checkbox">改裝過</label>
+    </div>
+    <div class="tm-est-result" id="est-result" aria-live="polite"></div>
+    <p class="tm-note" id="est-note">—</p>
+  </section>
+
   <section class="tm-card" id="line-card" aria-label="路線圖" hidden>
     <h3 id="line-title">路線圖</h3>
     <div class="tm-linechart" id="line-chart"></div>
@@ -213,6 +244,7 @@
     <p><strong>品質調整</strong>：<span id="note-hedonic">—</span></p>
     <p><strong>綜合</strong>：取引價格（2005 年起）與成約價格（2021 年起，透過仲介的成交）合在一起的指標。同一區、同一年，兩者的中位數有落差（各區不同），所以先用 2021 年以後兩邊都有的年份估計每區的落差，把成約換算成取引的水準，再依誤差大小加權平均；2020 年以前只有取引。落差每年變動越大，成約的權重越小。數字以<strong>取引價格的水準</strong>表示。同一筆成交可能同時出現在兩邊（API 沒有交易 ID，無法去除重複），所以綜合的區間會稍微偏窄。</p>
     <p id="note-station-wrap"><strong>車站</strong>：<span id="note-station">—</span></p>
+    <p id="note-estimate-wrap" hidden><strong>估價</strong>：<span id="note-estimate">—</span></p>
     <p id="note-layers-wrap" hidden><strong>淹水、學區</strong>：<span id="note-layers">—</span></p>
     <p><strong>灰色與斜線</strong>：<span id="note-thresholds">—</span></p>
     <p><strong>限制</strong>：中位數會受「那年賣出的物件組成」（新舊、大小、地點）影響，還沒做時點修正或品質調整；API 的面積已四捨五入到 5㎡。<span id="note-advice">—</span></p>
@@ -230,6 +262,7 @@
   const T = data.thresholds;
   const S = data.stations; // 車站資料（沒跑 fetch-stations 時是 null）
   const L = data.layers; // 淹水、學區（沒跑 fetch-hazards 時是 null）
+  const E = data.estimate; // 估價的係數表
   const SL = S ? S.list : {};
   const lineByKey = S ? Object.fromEntries(S.lines.map((l) => [l.key, l])) : {};
   const DEFAULT_CITY = "13104"; // 一打開先選新宿区，面板就有內容
@@ -1021,6 +1054,7 @@
 
   function select(code, scroll) {
     state.selected = code;
+    if (E) setEstCity(code);
     redraw();
     if (scroll && window.matchMedia("(max-width: 860px)").matches) panel.scrollIntoView({ behavior: "smooth", block: "start" });
   }
@@ -1047,6 +1081,95 @@
   document.getElementById("line-select").addEventListener("change", (e) => setLine(e.target.value));
   document.getElementById("layer-select").addEventListener("change", (e) => { state.layer = e.target.value; render(); });
   for (const k of ["in", "out", "ku", "all"]) document.getElementById(`zoom-${k}`).addEventListener("click", () => zoomApi && zoomApi[k]());
+
+  // ---- 估價（公式和 analysis/estimate.py 的 CoefTable.log_price 相同；測試用 Python 照這個公式算一遍） ----
+  function estimateLog(city, district, area, built, plan, plusS, structure, renovated, seiyaku) {
+    const c = E.cities[city];
+    const age = Math.max(0, E.year - built);
+    const la = Math.log(area);
+    let out = c.now + c.districts[district];
+    out += E.area[0] * la + d3.sum(E.area[1], ([knot, coef]) => coef * Math.max(0, la - knot));
+    out += E.age[0] * age + d3.sum(E.age[1], ([knot, coef]) => coef * Math.max(0, age - knot));
+    out += E.areaNow * Math.log(area / E.standardArea);
+    out += E.oldSeismic * (built <= E.oldSeismicLastYear ? 1 : 0);
+    out += E.plans[plan] + E.plusS * (plusS ? 1 : 0) + E.structures[structure] + E.renovated * (renovated ? 1 : 0);
+    return out + (seiyaku ? c.seiyaku : 0);
+  }
+  // 區間的分組：屋齡帶 × 2 + 多摩（estimate.interval_group）
+  const estGroup = (city, built) => {
+    const age = Math.max(0, E.year - built);
+    return E.ageBands.filter((b) => age >= b).length * 2 + (city > E.kuMax ? 1 : 0);
+  };
+  const estEl = (id) => document.getElementById(id);
+  function fillEstDistricts() {
+    const ds = Object.keys(E.cities[estEl("est-city").value].districts).sort((a, b) => a.localeCompare(b, "ja"));
+    estEl("est-district").replaceChildren(...ds.map((d) => new Option(d, d)));
+    estEl("est-district").value = E.cities[estEl("est-city").value].top; // 預設：成交最多的町名
+  }
+  function setEstCity(code) {
+    if (!E || !E.cities[code] || estEl("est-city").value === code) return;
+    estEl("est-city").value = code;
+    fillEstDistricts();
+    drawEstimate();
+  }
+  function drawEstimate() {
+    const out = estEl("est-result"), note = estEl("est-note");
+    out.replaceChildren();
+    const city = estEl("est-city").value, district = estEl("est-district").value;
+    const area = +estEl("est-area").value, built = +estEl("est-built").value;
+    if (!(area >= 10 && area <= 300) || !(built >= 1950 && built <= E.year + 1) || !Number.isInteger(built)) {
+      out.append(el("p", "tm-sub", `面積請填 10〜300㎡、建築年請填 1950〜${E.year + 1} 年。`));
+      note.textContent = "";
+      return;
+    }
+    const g = estGroup(city, built);
+    const t = el("table", "tm-kv");
+    const tr0 = el("tr");
+    ["", ...E.levels.map((lv) => `${Math.round(lv * 100)}% 區間`)].forEach((x) => tr0.append(el("th", null, x)));
+    t.append(tr0);
+    for (const [pc, label] of [["01", "取引水準"], ["02", "成約水準"]]) {
+      if (pc === "02" && E.cities[city].seiyaku == null) continue;
+      const mu = estimateLog(city, district, area, built, estEl("est-plan").value, estEl("est-plus-s").checked,
+        estEl("est-structure").value, estEl("est-renovated").checked, pc === "02");
+      const tr = el("tr");
+      tr.append(el("td", null, label));
+      E.quantiles[g].forEach(([lo, hi]) => {
+        const td = el("td");
+        const ul = Math.exp(mu + lo), uh = Math.exp(mu + hi);
+        td.append(el("b", null, `${fmtN(Math.round(ul / 1e4))}〜${fmtN(Math.round(uh / 1e4))} 萬／㎡`),
+          el("small", null, `總價 ${fmtN(Math.round(ul * area / 1e5) * 10)}〜${fmtN(Math.round(uh * area / 1e5) * 10)} 萬`));
+        tr.append(td);
+      });
+      t.append(tr);
+    }
+    out.append(t);
+    const cov = E.coverage["全部"];
+    note.textContent = `「${E.groups[g]}」的物件：用模型沒看過的最近成交實測，一半落在 50% 區間、八成落在 80% 區間（檢驗資料整體 ${Math.round(cov[0] * 100)}%／${Math.round(cov[1] * 100)}%）。` +
+      `這是同樣條件的物件在 ${E.period} 的成交價範圍，不是這間的價值；樓層、方位、離車站的距離、管理狀態、哪一棟大樓都不在模型裡，所以很寬。` +
+      (E.cities[city].seiyaku == null ? `${nameOf(city, city)}的成約價格不夠多，只給取引水準。` : "") +
+      "類似的過去成交（同町名的實際成交、換算成這間的條件）請用指令 tokyo-housing-lab estimate 看。";
+  }
+  if (E) {
+    estEl("est-card").hidden = false;
+    const codes = Object.keys(E.cities).sort();
+    estEl("est-city").replaceChildren(...codes.map((c) => new Option(nameOf(c, c), c)));
+    estEl("est-city").value = E.cities[state.selected] ? state.selected : codes[0];
+    fillEstDistricts();
+    estEl("est-built").value = String(E.year - 17);
+    estEl("est-built").max = String(E.year + 1);
+    estEl("est-plan").replaceChildren(...Object.keys(E.plans).map((p) => new Option(p, p)));
+    estEl("est-plan").value = "2LDK";
+    estEl("est-structure").replaceChildren(...Object.keys(E.structures).map((x) => new Option(x, x)));
+    estEl("est-city").addEventListener("change", () => { fillEstDistricts(); drawEstimate(); });
+    for (const id of ["est-district", "est-plan", "est-structure", "est-plus-s", "est-renovated"]) estEl(id).addEventListener("change", drawEstimate);
+    for (const id of ["est-area", "est-built"]) estEl(id).addEventListener("input", drawEstimate);
+    drawEstimate();
+    estEl("note-estimate-wrap").hidden = false;
+    estEl("note-estimate").textContent =
+      `用品質調整模型（最近 11 年、每 4 季一期）估「${E.period}」同樣條件的物件的 ㎡ 單價：區的現在水準＋町名的地點效果（用途地域、容積率依該町名的成交平均）＋面積、屋齡、舊耐震、房型、構造、改裝的效果。` +
+      `區間用 split conformal：最新 4 季的成交留 20% 不參加估計，用同樣的方法預測，「實際 ÷ 預測」的分位數就是區間；分位數依屋齡（10 年一段）和 23 區／多摩分組（不分組時，舊物件的 80% 區間只蓋到 74%）。` +
+      `另外留 10% 檢驗：80% 區間實際蓋到 ${Math.round(E.coverage["全部"][1] * 100)}%（${fmtN(E.coverageN["全部"])} 筆）。只給區間、不給單一數字。只是過去成交資料的整理，不是鑑價。`;
+  }
 
   // ---- 固定文字 ----
   const totalLatest = d3.sum(Object.values(M), (m) => (m.latest["01"] ? m.latest["01"].n : 0));

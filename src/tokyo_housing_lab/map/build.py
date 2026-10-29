@@ -7,6 +7,7 @@
 import base64
 import json
 import math
+from collections import Counter
 from datetime import date
 from importlib.resources import files
 from itertools import combinations
@@ -15,6 +16,7 @@ from typing import Any
 import numpy as np
 
 from tokyo_housing_lab import DISCLAIMER
+from tokyo_housing_lab.analysis.estimate import AGE_BANDS, KU_MAX, PLAN_GROUPS, Estimator, group_label
 from tokyo_housing_lab.analysis.hazards import STATION_RADIUS_M, THRESHOLDS, HazardAnalysis
 from tokyo_housing_lab.analysis.municipalities import COMBINED, HEDONIC, INVEST_PRICE_CLASSIFICATION, Analysis
 from tokyo_housing_lab.analysis.stations import StationAnalysis, line_label, operator_label
@@ -163,7 +165,11 @@ def build_station_data(sa: StationAnalysis) -> dict[str, Any]:
 
 
 def build_map_data(
-    analysis: Analysis, generated: date, stations: StationAnalysis | None = None, layers: HazardAnalysis | None = None
+    analysis: Analysis,
+    generated: date,
+    stations: StationAnalysis | None = None,
+    layers: HazardAnalysis | None = None,
+    estimator: Estimator | None = None,
 ) -> dict[str, Any]:
     """地圖要的全部數字。漲幅只放「兩年都達到樣本門檻」的組合，沒放的就是樣本不足。
 
@@ -266,6 +272,7 @@ def build_map_data(
         "municipalities": municipalities,
         "stations": None if stations is None else build_station_data(stations),
         "layers": None if layers is None else build_layer_data(layers),
+        "estimate": None if estimator is None else build_estimate_data(estimator),
     }
 
 
@@ -327,6 +334,43 @@ def build_layer_data(hz: HazardAnalysis) -> dict[str, Any]:
     }
 
 
+def build_estimate_data(est: Estimator) -> dict[str, Any]:
+    """估價表單用：係數表攤成 JS 好算的形式（公式見 template.html 的 estimateLog；測試用 Python 照算一遍）。"""
+    t = est.table
+    b, spec = t.building, t.spec
+    counts = Counter(zip(est.model.sample.city.tolist(), est.model.sample.district.tolist(), strict=True)) if est.model else Counter()
+    return {
+        "year": t.year,
+        "period": est.period_label,
+        "standardArea": spec.standard_area,
+        "oldSeismicLastYear": spec.old_seismic_last_year,
+        "area": [b.get("ln面積", 0.0), [[math.log(k), b.get(f"ln面積>{k:g}", 0.0)] for k in spec.area_knots]],
+        "age": [b.get("屋齡", 0.0), [[k, b.get(f"屋齡>{k:g}", 0.0)] for k in spec.age_knots]],
+        "areaNow": b.get("面積×時間:0", 0.0),
+        "oldSeismic": b.get("舊耐震", 0.0),
+        "plans": {g: b.get(f"房型:{g}", 0.0) for g in PLAN_GROUPS if g == "2LDK" or g in t.plans},
+        "plusS": b.get("房型:+S", 0.0),
+        "structures": {st: b.get(f"構造:{st}", 0.0) for st in t.structures},
+        "renovated": b.get("改裝:改装済み", 0.0),
+        "cities": {
+            c: {
+                "now": _r(now, 6),
+                "seiyaku": _r(t.seiyaku.get(c), 6),
+                "districts": {d: _r(v, 6) for d, v in sorted(t.district_loc[c].items())},
+                "top": max(sorted(t.district_loc[c]), key=lambda d: counts[(c, d)]),  # 表單預設：成交最多的町名
+            }
+            for c, now in t.city_now.items()
+        },
+        "ageBands": list(AGE_BANDS),
+        "kuMax": KU_MAX,
+        "groups": [group_label(g) for g in sorted(est.quantiles)],
+        "quantiles": [[[_r(lo, 6), _r(hi, 6)] for _, (lo, hi) in sorted(est.quantiles[g].items())] for g in sorted(est.quantiles)],
+        "levels": sorted(next(iter(est.quantiles.values()))),
+        "coverage": {k: [_r(v, 3) for _, v in sorted(c.items())] for k, c in est.coverage.items()},
+        "coverageN": est.coverage_n,
+    }
+
+
 def _boundaries() -> dict[str, Any]:
     return json.loads(files("tokyo_housing_lab.map").joinpath("tokyo_municipalities.geojson").read_text(encoding="utf-8"))
 
@@ -349,6 +393,7 @@ def render_html(
     standalone: bool = True,
     stations: StationAnalysis | None = None,
     layers: HazardAnalysis | None = None,
+    estimator: Estimator | None = None,
 ) -> str:
     """standalone=True：完整的 HTML 文件，瀏覽器直接打開。
     False：只有內容片段（給會自己包上 <html>／<head> 的地方用，例如 claude.ai 的 Artifact）。
@@ -356,6 +401,6 @@ def render_html(
     template = files("tokyo_housing_lab.map").joinpath("template.html").read_text(encoding="utf-8")
     if template.count(DATA_PLACEHOLDER) != 1:
         raise RuntimeError("template.html 裡的資料佔位字串必須剛好一個")
-    payload = {"data": build_map_data(analysis, generated, stations, layers), "boundaries": _boundaries()}
+    payload = {"data": build_map_data(analysis, generated, stations, layers, estimator), "boundaries": _boundaries()}
     html = template.replace(DATA_PLACEHOLDER, _embed(payload))
     return _STANDALONE_HEAD + html + "\n</body>\n</html>\n" if standalone else html

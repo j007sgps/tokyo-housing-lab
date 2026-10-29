@@ -26,7 +26,6 @@ from itertools import pairwise
 import numpy as np
 
 from tokyo_housing_lab.analysis import hedonic as hd
-from tokyo_housing_lab.analysis.municipalities import HEDONIC_LATEST_WINDOWS
 from tokyo_housing_lab.analysis.trend import (
     Growth,
     LongTrend,
@@ -36,6 +35,7 @@ from tokyo_housing_lab.analysis.trend import (
     latest_price,
     long_term_trend,
 )
+from tokyo_housing_lab.analysis.window import WindowSample, fit_window, load_window_sample
 from tokyo_housing_lab.storage.duckdb_store import DuckDBStore
 
 BUY_QUARTERS = 12  # 購買模式：最近 3 年
@@ -133,22 +133,19 @@ def _load_stations(store: DuckDBStore) -> tuple[dict[str, StationResult], dict[s
     return stations, dict(lines)
 
 
-def build_station_analysis(store: DuckDBStore, region: str = "13") -> StationAnalysis:
-    """要先跑過 fetch-stations 和 load。估一次品質調整模型（約 10 秒）。"""
-    cols = store.query_columns("hedonic_sample", region=region)
-    station_ids = np.asarray(cols["station_id"]).astype(str)
-    if not (station_ids != "").any():
+def build_station_analysis(
+    store: DuckDBStore, region: str = "13", window: tuple[WindowSample, hd.Model] | None = None
+) -> StationAnalysis:
+    """要先跑過 fetch-stations 和 load。估一次品質調整模型（約 10 秒）；window 可以傳入已經估好的（估價也用同一個）。"""
+    ws, model = window if window is not None else (None, None)
+    if ws is None:
+        ws = load_window_sample(store, region)
+    if not (ws.station_ids != "").any():
         raise ValueError("沒有成交對上車站，請先執行 fetch-stations 和 load")
-    sample = hd.Sample.from_columns(cols)
-    qi = sample.year.astype(int) * 4 + sample.quarter.astype(int) - 1
-    last = int(qi.max())
-    ly, lq = last // 4, last % 4 + 1
-    period = hd.window_period(sample, ly, lq)
-    subperiod = hd.window_subperiod(sample, ly, lq)
-    recent = period > -HEDONIC_LATEST_WINDOWS
-    sample, period, subperiod = sample.subset(recent), period[recent], subperiod[recent]
-    station_ids, qi = station_ids[recent], qi[recent]
-    model = hd.fit_hedonic(sample, period, subperiod=subperiod)
+    if model is None:
+        model = fit_window(ws)
+    sample, period, subperiod, station_ids, qi = ws.sample, ws.period, ws.subperiod, ws.station_ids, ws.qi
+    last, ly, lq = ws.last, ws.last_year, ws.last_quarter
     std, ok = hd.standardize(model, sample, period, subperiod)
 
     # 購買模式：時點修正到最新 4 季（區 × 季的係數，和 time_adjustment 表同一個方法）

@@ -1,4 +1,5 @@
 import json
+import math
 import re
 from datetime import date
 from importlib.resources import files
@@ -307,3 +308,71 @@ def test_render_html_with_layers(analysis, hazard_analysis):
     html = render_html(analysis, GENERATED, layers=hazard_analysis)
     assert payload_of(html)["data"]["layers"]["schools"]["junior"] == []
     assert 'id="layer-select"' in html
+
+
+# --- 估價表單 ---
+
+
+def js_like_log(e, city, district, area, built, plan, plus_s, structure, renovated, seiyaku):
+    """照 template.html 的 estimateLog 算（地圖的 JS 也是這個公式）。"""
+    c = e["cities"][city]
+    age = max(0, e["year"] - built)
+    la = math.log(area)
+    out = c["now"] + c["districts"][district]
+    out += e["area"][0] * la + sum(coef * max(0, la - knot) for knot, coef in e["area"][1])
+    out += e["age"][0] * age + sum(coef * max(0, age - knot) for knot, coef in e["age"][1])
+    out += e["areaNow"] * math.log(area / e["standardArea"])
+    out += e["oldSeismic"] * (built <= e["oldSeismicLastYear"])
+    out += e["plans"][plan] + e["plusS"] * plus_s + e["structures"][structure] + e["renovated"] * renovated
+    return out + (c["seiyaku"] if seiyaku else 0)
+
+
+@pytest.fixture(scope="module")
+def estimator_and_window(tmp_path_factory):
+    from test_estimate import build_estimate_db
+
+    from tokyo_housing_lab.analysis.estimate import build_estimator
+    from tokyo_housing_lab.analysis.window import fit_window, load_window_sample
+
+    with DuckDBStore(build_estimate_db(tmp_path_factory.mktemp("est") / "e.duckdb")) as s:
+        ws = load_window_sample(s)
+    return build_estimator(ws, fit_window(ws)), ws
+
+
+@pytest.mark.parametrize(
+    ("city", "district", "area", "built", "plan", "structure", "renovation"),
+    [
+        ("13104", "西新宿", 60, 2005, "2LDK", "RC", "未改装"),
+        ("13104", "大久保", 22, 1978, "1LDK+S", "RC", "未改装"),
+        ("13104", "小町", 95, 2024, "3LDK", "RC", "未改装"),
+        ("13202", "富士見町", 70, 1990, "3LDK", "RC", "未改装"),
+    ],
+)
+def test_estimate_data_formula_matches_table(estimator_and_window, city, district, area, built, plan, structure, renovation):
+    from tokyo_housing_lab.analysis import hedonic as hd
+    from tokyo_housing_lab.analysis.estimate import Subject
+
+    est, _ = estimator_and_window
+    e = build.build_estimate_data(est)
+    s = Subject(city, district, area, built, plan, structure, renovation)
+    group, plus_s = hd.floor_plan_group(plan)
+    for pc in ("01", "02"):
+        if pc == "02" and e["cities"][city]["seiyaku"] is None:
+            continue
+        got = js_like_log(e, city, district, area, built, group, plus_s, structure, renovation == "改装済み", pc == "02")
+        assert got == pytest.approx(est.table.log_price(s, pc), abs=1e-4)
+
+
+def test_estimate_data_structure(estimator_and_window, analysis):
+    est, _ = estimator_and_window
+    e = build_map_data(analysis, GENERATED, estimator=est)["estimate"]
+    assert e["period"] == "2025Q1〜2025Q4" and e["year"] == 2025
+    assert set(e["cities"]) == {"13104", "13202"} and e["cities"]["13202"]["seiyaku"] is None
+    assert set(e["cities"]["13104"]["districts"]) == {"西新宿", "大久保", "小町"}
+    assert e["cities"]["13104"]["top"] in ("西新宿", "大久保")  # 成交最多的町名（小町只有幾筆）
+    assert e["levels"] == [0.5, 0.8] and len(e["quantiles"]) == len(e["groups"]) == 10
+    lo, hi = e["quantiles"][0][1]
+    assert lo < 0 < hi
+    assert set(e["plans"]) == {"2LDK", "1LDK", "3LDK"} and e["plans"]["2LDK"] == 0
+    assert e["structures"] == {"RC": 0.0} and "全部" in e["coverage"]
+    assert build_map_data(analysis, GENERATED)["estimate"] is None

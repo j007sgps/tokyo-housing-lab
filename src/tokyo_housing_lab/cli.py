@@ -9,10 +9,12 @@
   hedonic：品質調整指數的模型診斷（係數、配適度、驗證；只讀 DuckDB）
   adjust：時點修正係數（舊成交 → 最新 4 季的水準），寫進 DuckDB 的 time_adjustment 表
   hazards：各區、各車站周邊的淹水比例（洪水、高潮）與車站所在的學區（只讀 DuckDB）
+  estimate：估價（現在的成交價會落在的 50%／80% 區間，加上類似的過去成交；只讀 DuckDB）
   map  ：產生地圖 HTML（只讀 DuckDB）
 """
 
 import argparse
+import difflib
 import logging
 import math
 import re
@@ -25,6 +27,7 @@ import numpy as np
 
 from tokyo_housing_lab import DISCLAIMER
 from tokyo_housing_lab.analysis import hedonic as hd
+from tokyo_housing_lab.analysis.estimate import PRICE_LEVELS, Subject, build_estimator, comparables, estimate, group_label
 from tokyo_housing_lab.analysis.hazards import STATION_RADIUS_M, THRESHOLDS, build_hazards
 from tokyo_housing_lab.analysis.municipalities import COMBINED, HEDONIC, INVEST_PRICE_CLASSIFICATION, build_analysis
 from tokyo_housing_lab.analysis.stations import StationAnalysis, build_station_analysis, line_label
@@ -420,19 +423,35 @@ def _map(args: argparse.Namespace) -> None:
 
     if not args.db.is_file():
         raise FileNotFoundError(f"找不到資料庫 {args.db}，請先執行 load")
+    from tokyo_housing_lab.analysis.window import fit_window, load_window_sample
+
     with DuckDBStore(args.db) as store:
         a = build_analysis(store, args.region)
+        # 車站分析和估價共用同一個視窗模型（只估一次）
         try:
-            stations = build_station_analysis(store, args.region)
-        except ValueError as e:  # 沒有車站資料：只畫行政區
-            print(f"（不畫車站：{e}）")
-            stations = None
+            ws = load_window_sample(store, args.region)
+            window_model = fit_window(ws)
+        except ValueError as e:  # 資料太少，品質調整模型估不出來
+            print(f"（不畫車站、不放估價：{e}）")
+            ws = window_model = None
+        stations = None
+        if ws is not None:
+            try:
+                stations = build_station_analysis(store, args.region, window=(ws, window_model))
+            except ValueError as e:  # 沒有車站資料：只畫行政區
+                print(f"（不畫車站：{e}）")
         try:
             layers = build_hazards(store)
         except ValueError as e:  # 沒有圖層資料
             print(f"（不畫淹水、學區圖層：{e}）")
             layers = None
-    html = render_html(a, date.today(), standalone=not args.fragment, stations=stations, layers=layers)
+    estimator = None
+    if ws is not None:
+        try:
+            estimator = build_estimator(ws, window_model)
+        except ValueError as e:  # 資料太少，估不出來
+            print(f"（不放估價：{e}）")
+    html = render_html(a, date.today(), standalone=not args.fragment, stations=stations, layers=layers, estimator=estimator)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(html, encoding="utf-8")
     n_st = "" if stations is None else f"、{sum(1 for r in stations.stations.values() if r.cities)} 個車站"
@@ -473,6 +492,95 @@ def _hazards(args: argparse.Namespace) -> None:
         print("※ 成交只知道最寄駅，這是車站周邊的指標，不是每筆物件的；學區是車站座標所在的學區")
     print("※ 洪水是想定最大規模（不含內水氾濫）；學區是國土數值情報令和5年度（品川區、荒川區沒有資料）")
     print()
+    print(DISCLAIMER)
+
+
+def _find_city(arg: str, names: dict[str, str]) -> str:
+    """代碼、名稱（新宿区）或省略「区市町村」（新宿）都可以。"""
+    if arg in names:
+        return arg
+    found = [c for c, n in names.items() if n == arg or n.endswith(arg) or n[:-1].endswith(arg)]
+    if len(found) == 1:
+        return found[0]
+    if found:
+        raise ValueError(f"「{arg}」對到好幾個市區町村：{'、'.join(names[c] for c in found)}")
+    raise ValueError(f"找不到市區町村「{arg}」（可以用代碼，例：13104，或名稱，例：新宿区）")
+
+
+def _find_district(arg: str, city_name: str, districts: list[str]) -> str:
+    if arg in districts:
+        return arg
+    near = [d for d in districts if arg in d or d in arg] or difflib.get_close_matches(arg, districts, n=8, cutoff=0.4)
+    hint = f"相近的：{'、'.join(near[:8])}" if near else f"這區有 {len(districts)} 個町名，例：{'、'.join(districts[:8])}"
+    raise ValueError(f"{city_name}找不到町名「{arg}」（{hint}）")
+
+
+def _man_range(lo: float, hi: float) -> str:
+    return f"{lo / 10000:,.0f}〜{hi / 10000:,.0f} 萬"
+
+
+def _total_range(lo: float, hi: float) -> str:
+    # 總價取到 10 萬
+    return f"{round(lo / 1e5) * 10:,.0f}〜{round(hi / 1e5) * 10:,.0f} 萬"
+
+
+def _estimate(args: argparse.Namespace) -> None:
+    from tokyo_housing_lab.analysis.window import load_window_sample
+
+    if not args.db.is_file():
+        raise FileNotFoundError(f"找不到資料庫 {args.db}，請先執行 load")
+    if not 10 <= args.area <= 300:
+        raise ValueError("--area 要在 10〜300㎡ 之間")
+    with DuckDBStore(args.db) as store:
+        names = {r["city"]: r["name"] for r in store.query("municipality_names", region=args.region)}
+        city = _find_city(args.city, names)
+        ws = load_window_sample(store, args.region)
+    if not 1950 <= args.built <= ws.last_year + 1:
+        raise ValueError(f"--built 要在 1950〜{ws.last_year + 1} 之間")
+    est = build_estimator(ws)
+    t = est.table
+    if city not in t.city_now:
+        raise ValueError(f"{names[city]}最新 4 季（{est.period_label}）沒有成交，估不出來")
+    district = _find_district(args.district, names[city], sorted(t.district_loc[city]))
+    s = Subject(city, district, args.area, args.built, args.plan, args.structure, "改装済み" if args.renovated else "未改装")
+    e = estimate(est, s)
+    age = max(0, t.year - s.building_year)
+    print(f"估價：{names[city]} {district}・{s.area:g}㎡・{s.building_year} 年建（屋齡約 {age} 年）・{s.floor_plan}・{s.structure}・"
+          f"{'改裝過' if args.renovated else '未改裝'}")  # fmt: skip
+    print(f"現在（{est.period_label}）同樣條件的物件，成交價會落在：")
+    for pc, rs in e.ranges.items():
+        print(f"  {PRICE_LEVELS[pc]}水準")
+        for r in rs:
+            print(f"    {r.level:.0%} 區間  ㎡ 單價 {_man_range(r.unit_low, r.unit_high)}／㎡  總價 {_total_range(r.total_low, r.total_high)}")
+    if "02" not in e.ranges:
+        print(f"  （{names[city]}的成約價格不夠多，只給取引水準）")
+    g = e.group
+    cov = est.coverage
+    print(f"  ※ 區間是用模型沒看過的最近成交實測的：「{group_label(g)}」的物件，一半落在 50% 區間、八成落在 80% 區間"
+          f"（檢驗資料整體：{cov['全部'][0.5]:.0%}／{cov['全部'][0.8]:.0%}）。不是這間的「價值」，是同條件物件的成交價的範圍。")  # fmt: skip
+    if not 20 <= s.area <= 120:
+        print("  ※ 這個面積的成交比較少，區間可能不準。")
+
+    comps = comparables(est, s)
+    print()
+    print("類似的過去成交（同町名、最近 3 年、面積 ±30%、建築年 ±10 年；最多 8 筆，依相似度）：")
+    if not comps:
+        print("  沒有符合條件的成交。")
+    else:
+        print(f"  {'成交季':<8}{'種類':<4}{'面積':>6}{'建築年':>7}  {'房型':<6}{'單價':>7}{'時點修正後':>9}{'換算成這間':>9}（萬／㎡）")
+        for c in comps:
+            print(f"  {c.year}Q{c.quarter:<3}{PRICE_LEVELS[c.price_classification]:<4}{c.area:>5g}㎡{c.building_year:>6}年  "
+                  f"{c.floor_plan:<6}{_man(c.unit_price):>7}{_man(c.time_adjusted):>11}{_man(c.converted):>12}")  # fmt: skip
+        inside = {}
+        for c in comps:
+            r = {x.level: x for x in e.ranges[c.price_classification]}
+            for lv, x in r.items():
+                inside.setdefault(lv, []).append(x.unit_low <= c.converted <= x.unit_high)
+        print(f"  換算成這間之後：{sum(inside[0.5])}／{len(comps)} 筆在 50% 區間內、{sum(inside[0.8])}／{len(comps)} 筆在 80% 區間內。")
+        print("  ※ 時點修正後：建物條件不變，換算成現在的價格水準。換算成這間：再加上面積、屋齡、房型等的差（用模型的係數）；")
+        print("    樓層、方位、管理狀態等的差換算不了，留在那筆成交自己的價格裡。同一筆成交可能同時出現在取引和成約裡（API 沒有交易 ID）。")
+    print()
+    print("※ 模型沒有樓層、方位、離車站的距離、管理狀態，所以區間很寬。只是過去成交資料的整理，不是鑑價，也不是投資建議。")
     print(DISCLAIMER)
 
 
@@ -564,6 +672,20 @@ def build_parser() -> argparse.ArgumentParser:
     hz.add_argument("--city", help="--by station 時只看這個市區町村（代碼，例：13108 江東區）")
     hz.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     hz.set_defaults(handler=_hazards)
+
+    es = sub.add_parser(
+        "estimate", help="估價：現在的成交價會落在的 50%%／80%% 區間、類似的過去成交（要估模型，約 20 秒）", epilog=DISCLAIMER
+    )
+    es.add_argument("--city", required=True, help="市區町村：代碼（13104）或名稱（新宿区、新宿）")
+    es.add_argument("--district", required=True, help="町名（不含丁目，例：西新宿）")
+    es.add_argument("--area", type=float, required=True, help="專有面積（㎡）")
+    es.add_argument("--built", type=int, required=True, help="建築年（西元，例：2005）")
+    es.add_argument("--plan", default="2LDK", help="房型（預設 2LDK；例：1R、1LDK、3LDK+S）")
+    es.add_argument("--structure", choices=["RC", "SRC"], default="RC", help="構造（預設 RC）")
+    es.add_argument("--renovated", action="store_true", help="改裝過")
+    es.add_argument("--region", default=TOKYO)
+    es.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    es.set_defaults(handler=_estimate)
 
     map_ = sub.add_parser("map", help="產生地圖 HTML（趨勢／購買／投資模式）", epilog=DISCLAIMER)
     map_.add_argument("--out", type=Path, default=DEFAULT_MAP_PATH, help=f"輸出位置（預設 {DEFAULT_MAP_PATH}）")

@@ -400,3 +400,56 @@ def test_fetch_hazards_then_load(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "圖層：洪水 1 個圖磚、小學校區 1 個圖磚、洪水的浸水格" in out and "小學校區 1 校" in out
     assert FAKE_KEY not in out
+
+
+# --- 估價 ---
+
+
+@pytest.fixture(scope="module")
+def estimate_db(tmp_path_factory):
+    from test_estimate import build_estimate_db
+
+    return build_estimate_db(tmp_path_factory.mktemp("est") / "e.duckdb")
+
+
+def test_estimate(estimate_db, capsys):
+    args = ["estimate", "--city", "新宿", "--district", "西新宿", "--area", "60", "--built", "2005", "--db", str(estimate_db)]
+    assert cli.main(args) == 0
+    out = capsys.readouterr().out
+    assert "估價：新宿区 西新宿・60㎡・2005 年建" in out and "現在（2025Q1〜2025Q4）" in out
+    assert out.count("50% 區間  ㎡ 單價") == 2 and out.count("80% 區間  ㎡ 單價") == 2  # 取引、成約
+    assert "成約水準" in out and "類似的過去成交" in out and "換算成這間之後" in out
+    assert "不是鑑價" in out and out.rstrip().endswith(DISCLAIMER)
+
+
+def test_estimate_trade_only_city_and_code(estimate_db, capsys):
+    args = ["estimate", "--city", "13202", "--district", "曙町", "--area", "70", "--built", "1990", "--plan", "3LDK",
+            "--db", str(estimate_db)]  # fmt: skip
+    assert cli.main(args) == 0
+    out = capsys.readouterr().out
+    assert "立川市 曙町" in out and "成約水準" not in out and "只給取引水準" in out
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["--city", "新宿", "--district", "西新"], "相近的：西新宿"),
+        (["--city", "渋谷", "--district", "神南"], "找不到市區町村「渋谷」"),
+        (["--city", "新宿", "--district", "西新宿", "--area", "5"], "--area"),
+        (["--city", "新宿", "--district", "西新宿", "--built", "1900"], "--built"),
+    ],
+)
+def test_estimate_errors(estimate_db, capsys, extra, message):
+    base = {"--area": "60", "--built": "2005"}
+    for i in range(0, len(extra), 2):
+        base[extra[i]] = extra[i + 1]
+    args = ["estimate", *[x for kv in base.items() for x in kv], "--db", str(estimate_db)]
+    assert cli.main(args) == 1
+    assert message in capsys.readouterr().err
+
+
+def test_map_with_estimate(estimate_db, tmp_path, capsys):
+    out_file = tmp_path / "m.html"
+    assert cli.main(["map", "--db", str(estimate_db), "--out", str(out_file)]) == 0
+    html = out_file.read_text(encoding="utf-8")
+    assert '"estimate":{"year":2025' in html and 'id="est-card"' in html
